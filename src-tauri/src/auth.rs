@@ -98,7 +98,13 @@ pub fn fingerprint(auth: &AuthFile) -> String {
         let uid = entry.user_id.clone().unwrap_or_default();
         let email = entry.email.clone().unwrap_or_default();
         let created = entry.create_time.clone().unwrap_or_default();
-        return format!("{uid}|{email}|{created}");
+        // Include token prefix so refresh/re-login is detected even if create_time is stable.
+        let key_fp = if entry.key.len() > 24 {
+            &entry.key[..24]
+        } else {
+            entry.key.as_str()
+        };
+        return format!("{uid}|{email}|{created}|{key_fp}");
     }
     String::new()
 }

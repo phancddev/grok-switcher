@@ -104,7 +104,12 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install Rust stable
+      - name: Install Rust stable (host only)
+        if: matrix.rust_target == ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust stable (with cross target)
+        if: matrix.rust_target != ''
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}

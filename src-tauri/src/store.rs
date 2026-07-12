@@ -25,7 +25,14 @@ pub fn save_meta(meta: &MetaFile) -> AppResult<()> {
     ensure_app_dirs()?;
     let path = meta_path()?;
     let raw = serde_json::to_string_pretty(meta)?;
-    fs::write(&path, raw)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &raw)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -88,12 +95,18 @@ pub fn import_auth_as_account(auth: &AuthFile) -> AppResult<(String, AccountMeta
 }
 
 pub fn list_summaries(settings: &Settings) -> AppResult<Vec<AccountSummary>> {
-    let meta = load_meta()?;
+    let mut meta = load_meta()?;
+    // Live auth.json is source of truth for which account Grok currently uses.
     let active_from_file = detect_active_user_id(settings)?;
-    let active = meta
-        .active_user_id
-        .clone()
-        .or(active_from_file.clone());
+    let active = if let Some(ref live) = active_from_file {
+        if meta.accounts.contains_key(live) && meta.active_user_id.as_ref() != Some(live) {
+            meta.active_user_id = Some(live.clone());
+            let _ = save_meta(&meta);
+        }
+        Some(live.clone())
+    } else {
+        meta.active_user_id.clone()
+    };
 
     let mut out: Vec<AccountSummary> = meta
         .accounts

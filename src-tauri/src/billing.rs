@@ -31,10 +31,12 @@ struct MoneyVal {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
+    #[allow(dead_code)]
     pub user_id: Option<String>,
     pub email: Option<String>,
     pub first_name: Option<String>,
     pub last_name: Option<String>,
+    #[allow(dead_code)]
     pub has_grok_code_access: Option<bool>,
 }
 

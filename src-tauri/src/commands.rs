@@ -20,12 +20,9 @@ pub fn get_active() -> AppResult<Option<AccountSummary>> {
     Ok(list.into_iter().find(|a| a.is_active))
 }
 
-#[tauri::command]
-pub fn add_account() -> AppResult<AccountSummary> {
-    let s = settings::load_settings()?;
-    let (user_id, meta) = login::run_add_account(&s)?;
-    Ok(AccountSummary {
-        user_id: user_id.clone(),
+fn summary_from_import(user_id: String, meta: crate::types::AccountMeta) -> AccountSummary {
+    AccountSummary {
+        user_id,
         email: meta.email,
         first_name: meta.first_name,
         last_name: meta.last_name,
@@ -35,30 +32,60 @@ pub fn add_account() -> AppResult<AccountSummary> {
         created_at: meta.created_at,
         quota: meta.quota,
         tier: meta.tier,
+    }
+}
+
+/// Runs browser login on a worker thread so the UI stays responsive.
+#[tauri::command]
+pub async fn add_account() -> AppResult<AccountSummary> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let s = settings::load_settings()?;
+        let (user_id, meta) = login::run_add_account(&s)?;
+        Ok(summary_from_import(user_id, meta))
     })
+    .await
+    .map_err(|e| crate::error::AppError::msg(format!("Login task failed: {e}")))?
 }
 
 #[tauri::command]
-pub fn import_current_account() -> AppResult<AccountSummary> {
-    let s = settings::load_settings()?;
-    let (user_id, meta) = login::import_current(&s)?;
-    Ok(AccountSummary {
-        user_id: user_id.clone(),
-        email: meta.email,
-        first_name: meta.first_name,
-        last_name: meta.last_name,
-        label: meta.label,
-        is_active: true,
-        last_used: meta.last_used,
-        created_at: meta.created_at,
-        quota: meta.quota,
-        tier: meta.tier,
+pub async fn import_current_account() -> AppResult<AccountSummary> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let s = settings::load_settings()?;
+        let (user_id, meta) = login::import_current(&s)?;
+        Ok(summary_from_import(user_id, meta))
     })
+    .await
+    .map_err(|e| crate::error::AppError::msg(format!("Import task failed: {e}")))?
+}
+
+#[tauri::command]
+pub async fn refresh_all_quotas() -> AppResult<HashMap<String, QuotaOrError>> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let meta = store::load_meta()?;
+        let mut map = HashMap::new();
+        for user_id in meta.accounts.keys() {
+            match billing::refresh_quota(user_id) {
+                Ok(q) => {
+                    map.insert(user_id.clone(), QuotaOrError::Ok(q));
+                }
+                Err(e) => {
+                    map.insert(
+                        user_id.clone(),
+                        QuotaOrError::Err {
+                            error: e.to_string(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(map)
+    })
+    .await
+    .map_err(|e| crate::error::AppError::msg(format!("Quota refresh task failed: {e}")))?
 }
 
 #[tauri::command]
 pub fn switch_account(user_id: String) -> AppResult<AccountSummary> {
-    // Accept both snake_case and camelCase via dual registration below if needed.
     let s = settings::load_settings()?;
     login::switch_to(&s, &user_id)?;
     let list = store::list_summaries(&s)?;
@@ -80,15 +107,19 @@ pub fn remove_account(user_id: String) -> AppResult<()> {
 }
 
 #[tauri::command]
-pub fn refresh_quota(user_id: Option<String>) -> AppResult<QuotaInfo> {
-    let s = settings::load_settings()?;
-    let uid = match user_id {
-        Some(id) => id,
-        None => store::detect_active_user_id(&s)?
-            .or_else(|| store::load_meta().ok().and_then(|m| m.active_user_id))
-            .ok_or_else(|| crate::error::AppError::msg("No active account"))?,
-    };
-    billing::refresh_quota(&uid)
+pub async fn refresh_quota(user_id: Option<String>) -> AppResult<QuotaInfo> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = settings::load_settings()?;
+        let uid = match user_id {
+            Some(id) => id,
+            None => store::detect_active_user_id(&s)?
+                .or_else(|| store::load_meta().ok().and_then(|m| m.active_user_id))
+                .ok_or_else(|| crate::error::AppError::msg("No active account"))?,
+        };
+        billing::refresh_quota(&uid)
+    })
+    .await
+    .map_err(|e| crate::error::AppError::msg(format!("Quota task failed: {e}")))?
 }
 
 #[derive(Serialize)]
@@ -96,28 +127,6 @@ pub fn refresh_quota(user_id: Option<String>) -> AppResult<QuotaInfo> {
 pub enum QuotaOrError {
     Ok(QuotaInfo),
     Err { error: String },
-}
-
-#[tauri::command]
-pub fn refresh_all_quotas() -> AppResult<HashMap<String, QuotaOrError>> {
-    let meta = store::load_meta()?;
-    let mut map = HashMap::new();
-    for user_id in meta.accounts.keys() {
-        match billing::refresh_quota(user_id) {
-            Ok(q) => {
-                map.insert(user_id.clone(), QuotaOrError::Ok(q));
-            }
-            Err(e) => {
-                map.insert(
-                    user_id.clone(),
-                    QuotaOrError::Err {
-                        error: e.to_string(),
-                    },
-                );
-            }
-        }
-    }
-    Ok(map)
 }
 
 #[tauri::command]
