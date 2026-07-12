@@ -16,7 +16,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Serialize mutations that touch auth.json / backups.
-static AUTH_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static AUTH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -6,6 +6,7 @@ mod login;
 mod paths;
 mod settings;
 mod store;
+mod token_refresh;
 mod types;
 mod update;
 
@@ -20,6 +21,8 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
             }
+            // Refresh near-expiry tokens on startup and every five minutes.
+            token_refresh::spawn_background_refresh(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,6 +40,7 @@ pub fn run() {
             commands::resolve_grok_binary,
             commands::get_app_version,
             commands::check_github_update,
+            commands::refresh_all_tokens,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

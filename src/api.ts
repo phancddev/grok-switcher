@@ -77,3 +77,20 @@ export const getAppVersion = () => invoke<string>("get_app_version");
 
 export const checkGithubUpdate = () =>
   invoke<GithubUpdateInfo>("check_github_update");
+
+export type RefreshOneResult = {
+  userId: string;
+  ok: boolean;
+  message: string;
+  expiresAt?: string | null;
+};
+
+export type RefreshAllReport = {
+  results: RefreshOneResult[];
+  refreshed: number;
+  skipped: number;
+  failed: number;
+};
+
+export const refreshAllTokens = () =>
+  invoke<RefreshAllReport>("refresh_all_tokens");

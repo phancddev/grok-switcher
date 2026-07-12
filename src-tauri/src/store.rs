@@ -198,6 +198,8 @@ pub fn update_subscription(
 }
 
 pub fn get_access_token(user_id: &str) -> AppResult<String> {
+    // Lazy refresh if access is expired / about to expire
+    crate::token_refresh::ensure_fresh_token(user_id)?;
     let auth = load_account_snapshot(user_id)?;
     let (_, entry) = primary_entry(&auth)?;
     Ok(entry.key.clone())

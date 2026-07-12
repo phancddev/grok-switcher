@@ -4,6 +4,7 @@ use crate::login::{self, LoginStatusEvent};
 use crate::paths;
 use crate::settings::{self, Settings};
 use crate::store;
+use crate::token_refresh::{self, RefreshAllReport};
 use crate::types::{AccountSummary, QuotaInfo};
 use crate::update::{self, GithubUpdateInfo};
 use serde::Serialize;
@@ -178,4 +179,12 @@ pub async fn check_github_update() -> AppResult<GithubUpdateInfo> {
     tauri::async_runtime::spawn_blocking(update::check_github_latest)
         .await
         .map_err(|e| crate::error::AppError::msg(format!("Update check task failed: {e}")))?
+}
+
+/// Manually refresh OAuth access tokens for all stored accounts (force).
+#[tauri::command]
+pub async fn refresh_all_tokens() -> AppResult<RefreshAllReport> {
+    tauri::async_runtime::spawn_blocking(|| token_refresh::refresh_accounts(true))
+        .await
+        .map_err(|e| crate::error::AppError::msg(format!("Token refresh task failed: {e}")))
 }
