@@ -91,6 +91,7 @@ pub fn import_auth_as_account(auth: &AuthFile) -> AppResult<(String, AccountMeta
         tier: jwt_tier(&entry.key),
         subscription_tier: None,
         plan_expires_at: None,
+        week_tracker: None,
     };
     save_account_snapshot(&user_id, auth)?;
     Ok((user_id, meta))

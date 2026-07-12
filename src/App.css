@@ -336,7 +336,7 @@ input {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  margin-top: 8px;
+  margin-top: 6px;
   font-size: 0.8rem;
   color: var(--muted);
   line-height: 1.4;
@@ -345,6 +345,27 @@ input {
 .quota-reset strong {
   color: var(--text);
   font-weight: 600;
+}
+
+.period-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.period-bar + .period-bar,
+.period-stack .period-bar:not(:first-child) {
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.source-tag {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--warn);
+  opacity: 0.9;
 }
 
 .quota-head {

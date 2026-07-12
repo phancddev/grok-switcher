@@ -1,3 +1,17 @@
+export type PeriodQuota = {
+  kind: string;
+  label: string;
+  used: number;
+  limit: number;
+  percentUsed: number;
+  periodStart: string;
+  periodEnd: string;
+  resetsAt: string;
+  daysUntilReset: number;
+  /** "api" | "tracked" */
+  source: string;
+};
+
 export type QuotaInfo = {
   used: number;
   monthlyLimit: number;
@@ -6,12 +20,12 @@ export type QuotaInfo = {
   billingPeriodEnd: string;
   percentUsed: number;
   fetchedAt: string;
-  /** "weekly" | "monthly" */
   periodKind?: string;
-  /** "Weekly" | "Monthly" */
   periodLabel?: string;
   daysUntilReset?: number;
   resetsAt?: string;
+  monthly?: PeriodQuota | null;
+  weekly?: PeriodQuota | null;
 };
 
 export type AccountSummary = {
@@ -25,9 +39,7 @@ export type AccountSummary = {
   createdAt?: string | null;
   quota?: QuotaInfo | null;
   tier?: number | null;
-  /** e.g. "GrokPro" */
   subscriptionTier?: string | null;
-  /** Plan end date if API provides it (often null) */
   planExpiresAt?: string | null;
 };
 

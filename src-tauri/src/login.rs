@@ -296,9 +296,6 @@ fn finalize_import(auth: &AuthFile, label: Option<String>) -> AppResult<(String,
         }
     }
     if let Ok((_, entry)) = crate::auth::primary_entry(auth) {
-        if let Ok(quota) = crate::billing::fetch_quota_for_token(&entry.key) {
-            meta.quota = Some(quota);
-        }
         // Prefer subscription-enriched user payload for plan name
         if let Ok(user) = crate::billing::fetch_subscription_for_token(&entry.key) {
             if let Some(email) = user.email.clone() {
@@ -325,7 +322,22 @@ fn finalize_import(auth: &AuthFile, label: Option<String>) -> AppResult<(String,
         }
         meta.tier = crate::auth::jwt_tier(&entry.key);
     }
+    // Save meta first so week tracker can attach to this user_id
     upsert_meta_account(&user_id, meta.clone())?;
+    if let Ok((_, entry)) = crate::auth::primary_entry(auth) {
+        if let Ok(q) = crate::billing::fetch_quota_for_token(&entry.key) {
+            if let Ok(q2) = crate::billing::attach_weekly_tracker(&user_id, q) {
+                meta.quota = Some(q2.clone());
+                let _ = crate::store::update_quota(&user_id, q2, meta.tier);
+            }
+        }
+    }
+    // reload meta for week_tracker consistency
+    if let Ok(m) = crate::store::load_meta() {
+        if let Some(acc) = m.accounts.get(&user_id) {
+            meta = acc.clone();
+        }
+    }
     Ok((user_id, meta))
 }
 

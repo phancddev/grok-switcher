@@ -1,8 +1,10 @@
 use crate::auth::{jwt_tier, primary_entry};
 use crate::error::{AppError, AppResult};
-use crate::store::{get_access_token, load_account_snapshot, update_quota, update_subscription};
-use crate::types::QuotaInfo;
-use chrono::{DateTime, Utc};
+use crate::store::{
+    get_access_token, load_account_snapshot, load_meta, save_meta, update_quota, update_subscription,
+};
+use crate::types::{PeriodQuota, QuotaInfo, WeekTracker};
+use chrono::{DateTime, Datelike, Duration, Utc};
 use serde::Deserialize;
 
 const BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing";
@@ -21,13 +23,11 @@ struct BillingConfig {
     used: MoneyVal,
     #[serde(default)]
     on_demand_cap: Option<MoneyVal>,
-    /// Optional: "WEEKLY" | "MONTHLY" (present on some API versions / plan types)
     #[serde(default)]
     current_period: Option<String>,
     billing_period_start: String,
     #[serde(default)]
     billing_period_end: Option<String>,
-    /// Optional weekly fields if API ever returns them
     #[serde(default)]
     weekly_limit: Option<MoneyVal>,
     #[serde(default)]
@@ -49,10 +49,8 @@ pub struct UserInfo {
     pub last_name: Option<String>,
     #[allow(dead_code)]
     pub has_grok_code_access: Option<bool>,
-    /// e.g. "GrokPro" when called with ?include=subscription
     #[serde(default)]
     pub subscription_tiers: Option<String>,
-    /// Not currently returned by API, reserved if xAI adds it later
     #[serde(default)]
     pub subscription_expires_at: Option<String>,
     #[serde(default)]
@@ -89,33 +87,55 @@ fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
         .map(|d| d.with_timezone(&Utc))
 }
 
-/// Infer weekly vs monthly from API enum or period length.
-fn period_kind(current_period: Option<&str>, start: &str, end: &str) -> (String, String) {
-    if let Some(cp) = current_period {
-        let u = cp.to_uppercase();
-        if u.contains("WEEK") {
-            return ("weekly".into(), "Weekly".into());
-        }
-        if u.contains("MONTH") {
-            return ("monthly".into(), "Monthly".into());
-        }
-    }
-    if let (Some(s), Some(e)) = (parse_rfc3339(start), parse_rfc3339(end)) {
-        let days = (e - s).num_days().abs();
-        // ~7 days → weekly, otherwise treat as monthly
-        if days > 0 && days <= 10 {
-            return ("weekly".into(), "Weekly".into());
-        }
-    }
-    ("monthly".into(), "Monthly".into())
+fn days_until(end: &DateTime<Utc>) -> i64 {
+    (*end - Utc::now()).num_days().max(0)
 }
 
-fn days_until_reset(end: &str) -> i64 {
-    let Some(e) = parse_rfc3339(end) else {
-        return 0;
-    };
-    let now = Utc::now();
-    (e - now).num_days().max(0)
+fn percent(used: f64, limit: f64) -> f64 {
+    if limit > 0.0 {
+        (used / limit) * 100.0
+    } else {
+        0.0
+    }
+}
+
+/// ISO week Monday 00:00 UTC → next Monday 00:00 UTC, key "YYYY-Www"
+fn iso_week_bounds(now: DateTime<Utc>) -> (String, DateTime<Utc>, DateTime<Utc>) {
+    let date = now.date_naive();
+    let weekday = date.weekday().num_days_from_monday() as i64; // Mon=0
+    let week_start_date = date - Duration::days(weekday);
+    let week_start = week_start_date
+        .and_hms_opt(0, 0, 0)
+        .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+        .unwrap_or(now);
+    let week_end = week_start + Duration::days(7);
+    let iso = date.iso_week();
+    let key = format!("{:04}-W{:02}", iso.year(), iso.week());
+    (key, week_start, week_end)
+}
+
+fn period_quota(
+    kind: &str,
+    label: &str,
+    used: f64,
+    limit: f64,
+    start: &str,
+    end: &str,
+    source: &str,
+) -> PeriodQuota {
+    let end_dt = parse_rfc3339(end);
+    PeriodQuota {
+        kind: kind.into(),
+        label: label.into(),
+        used,
+        limit,
+        percent_used: percent(used, limit),
+        period_start: start.into(),
+        period_end: end.into(),
+        resets_at: end.into(),
+        days_until_reset: end_dt.map(|e| days_until(&e)).unwrap_or(0),
+        source: source.into(),
+    }
 }
 
 pub fn fetch_quota_for_token(token: &str) -> AppResult<QuotaInfo> {
@@ -136,45 +156,190 @@ pub fn fetch_quota_for_token(token: &str) -> AppResult<QuotaInfo> {
 
     let data: BillingResponse = resp.json()?;
     let cfg = data.config;
-
-    // Prefer explicit weekly fields when present; else use monthlyLimit/used
-    // (API reuses monthlyLimit even for weekly periods on some tiers).
-    let (used, limit) = if let (Some(wu), Some(wl)) = (&cfg.weekly_used, &cfg.weekly_limit) {
-        (wu.val, wl.val)
-    } else {
-        (cfg.used.val, cfg.monthly_limit.val)
-    };
-
+    let used = cfg.used.val;
+    let monthly_limit = cfg.monthly_limit.val;
+    let on_demand_cap = cfg.on_demand_cap.map(|v| v.val).unwrap_or(0.0);
     let end = cfg
         .billing_period_end
         .clone()
         .unwrap_or_else(|| cfg.billing_period_start.clone());
-    let (kind, label) = period_kind(
-        cfg.current_period.as_deref(),
-        &cfg.billing_period_start,
-        &end,
-    );
+    let start = cfg.billing_period_start.clone();
 
-    let on_demand_cap = cfg.on_demand_cap.map(|v| v.val).unwrap_or(0.0);
-    let percent_used = if limit > 0.0 {
-        (used / limit) * 100.0
+    // API may return currentPeriod WEEKLY|MONTHLY; GrokPro usually omits it (monthly).
+    let api_is_weekly = cfg
+        .current_period
+        .as_deref()
+        .map(|s| s.to_uppercase().contains("WEEK"))
+        .unwrap_or(false);
+
+    let monthly = if api_is_weekly {
+        // Entire response is weekly — still surface a monthly-style bar for consistency
+        // using the same numbers labeled monthly only if period is long; else skip duplicate.
+        let days = parse_rfc3339(&start)
+            .and_then(|s| parse_rfc3339(&end).map(|e| (e - s).num_days().abs()))
+            .unwrap_or(30);
+        if days > 14 {
+            Some(period_quota(
+                "monthly",
+                "Monthly",
+                used,
+                monthly_limit,
+                &start,
+                &end,
+                "api",
+            ))
+        } else {
+            None
+        }
     } else {
-        0.0
+        Some(period_quota(
+            "monthly",
+            "Monthly",
+            used,
+            monthly_limit,
+            &start,
+            &end,
+            "api",
+        ))
+    };
+
+    // Weekly from API fields if present
+    let weekly_from_api = if let (Some(wu), Some(wl)) = (&cfg.weekly_used, &cfg.weekly_limit) {
+        // Derive week bounds from calendar if period not weekly
+        let (key, ws, we) = iso_week_bounds(Utc::now());
+        let _ = key;
+        Some(period_quota(
+            "weekly",
+            "Weekly",
+            wu.val,
+            wl.val,
+            &ws.to_rfc3339(),
+            &we.to_rfc3339(),
+            "api",
+        ))
+    } else if api_is_weekly {
+        Some(period_quota(
+            "weekly",
+            "Weekly",
+            used,
+            monthly_limit,
+            &start,
+            &end,
+            "api",
+        ))
+    } else {
+        None
+    };
+
+    let (kind, label) = if weekly_from_api.is_some() && monthly.is_none() {
+        ("weekly".into(), "Weekly".into())
+    } else {
+        ("monthly".into(), "Monthly".into())
     };
 
     Ok(QuotaInfo {
         used,
-        monthly_limit: limit,
+        monthly_limit,
         on_demand_cap,
-        billing_period_start: cfg.billing_period_start,
+        billing_period_start: start,
         billing_period_end: end.clone(),
-        percent_used,
-        fetched_at: chrono::Utc::now().to_rfc3339(),
+        percent_used: percent(used, monthly_limit),
+        fetched_at: Utc::now().to_rfc3339(),
         period_kind: kind,
         period_label: label,
-        days_until_reset: days_until_reset(&end),
+        days_until_reset: parse_rfc3339(&end).map(|e| days_until(&e)).unwrap_or(0),
         resets_at: end,
+        monthly,
+        weekly: weekly_from_api,
     })
+}
+
+/// Attach locally tracked weekly usage when API does not provide weekly numbers.
+pub fn attach_weekly_tracker(user_id: &str, mut quota: QuotaInfo) -> AppResult<QuotaInfo> {
+    // If API already gave weekly, keep it
+    if quota.weekly.as_ref().map(|w| w.source.as_str()) == Some("api") {
+        return Ok(quota);
+    }
+
+    let used = quota.used;
+    let monthly_limit = quota.monthly_limit;
+    let period_days = parse_rfc3339(&quota.billing_period_start)
+        .and_then(|s| {
+            parse_rfc3339(&quota.billing_period_end).map(|e| (e - s).num_days().abs().max(1))
+        })
+        .unwrap_or(30);
+
+    // Prorated weekly allowance from monthly limit
+    let weekly_limit = (monthly_limit * 7.0 / period_days as f64).round().max(1.0);
+
+    let now = Utc::now();
+    let (week_key, week_start, week_end) = iso_week_bounds(now);
+
+    let mut meta = load_meta()?;
+    let tracker = meta.accounts.get(user_id).and_then(|a| a.week_tracker.clone());
+
+    let (used_at_start, tracker_out) = match tracker {
+        Some(t) if t.week_key == week_key => {
+            // Same week: keep baseline; if used went down (period reset mid-week), re-baseline
+            let baseline = if used < t.used_at_week_start {
+                used
+            } else {
+                t.used_at_week_start
+            };
+            (
+                baseline,
+                WeekTracker {
+                    week_key: week_key.clone(),
+                    used_at_week_start: baseline,
+                    week_start: week_start.to_rfc3339(),
+                    week_end: week_end.to_rfc3339(),
+                },
+            )
+        }
+        _ => {
+            // New week (or first track): baseline = current used
+            (
+                used,
+                WeekTracker {
+                    week_key: week_key.clone(),
+                    used_at_week_start: used,
+                    week_start: week_start.to_rfc3339(),
+                    week_end: week_end.to_rfc3339(),
+                },
+            )
+        }
+    };
+
+    if let Some(acc) = meta.accounts.get_mut(user_id) {
+        acc.week_tracker = Some(tracker_out.clone());
+        save_meta(&meta)?;
+    }
+
+    let weekly_used = (used - used_at_start).max(0.0);
+    quota.weekly = Some(period_quota(
+        "weekly",
+        "Weekly",
+        weekly_used,
+        weekly_limit,
+        &week_start.to_rfc3339(),
+        &week_end.to_rfc3339(),
+        "tracked",
+    ));
+
+    // Ensure monthly is filled
+    if quota.monthly.is_none() {
+        quota.monthly = Some(period_quota(
+            "monthly",
+            "Monthly",
+            used,
+            monthly_limit,
+            &quota.billing_period_start,
+            &quota.billing_period_end,
+            "api",
+        ));
+    }
+
+    Ok(quota)
 }
 
 pub fn fetch_user_for_token(token: &str) -> AppResult<UserInfo> {
@@ -194,7 +359,6 @@ pub fn fetch_user_for_token(token: &str) -> AppResult<UserInfo> {
     Ok(resp.json()?)
 }
 
-/// Fetch plan name via ?include=subscription → subscriptionTier (e.g. GrokPro).
 pub fn fetch_subscription_for_token(token: &str) -> AppResult<UserInfo> {
     let client = client()?;
     let resp = client
@@ -222,12 +386,13 @@ pub fn plan_expires_from_user(user: &UserInfo) -> Option<String> {
 
 pub fn refresh_quota(user_id: &str) -> AppResult<QuotaInfo> {
     let token = get_access_token(user_id)?;
-    let quota = fetch_quota_for_token(&token)?;
+    let mut quota = fetch_quota_for_token(&token)?;
+    quota = attach_weekly_tracker(user_id, quota)?;
+
     let auth = load_account_snapshot(user_id)?;
     let (_, entry) = primary_entry(&auth)?;
     let tier = jwt_tier(&entry.key);
 
-    // Plan name (subscriptionTier) + optional expiry
     let (sub_tier, plan_exp) = match fetch_subscription_for_token(&token) {
         Ok(u) => (u.subscription_tiers.clone(), plan_expires_from_user(&u)),
         Err(_) => (None, None),
@@ -237,3 +402,4 @@ pub fn refresh_quota(user_id: &str) -> AppResult<QuotaInfo> {
     let _ = update_subscription(user_id, sub_tier, plan_exp);
     Ok(quota)
 }
+

@@ -27,16 +27,88 @@ function formatWhen(iso?: string | null): string {
   }
 }
 
+function toneFor(percent: number): "ok" | "warn" | "danger" {
+  if (percent >= 90) return "danger";
+  if (percent >= 70) return "warn";
+  return "ok";
+}
+
+function PeriodBar({
+  title,
+  used,
+  limit,
+  percent,
+  resetsAt,
+  daysLeft,
+  source,
+}: {
+  title: string;
+  used: number;
+  limit: number;
+  percent: number;
+  resetsAt?: string;
+  daysLeft?: number;
+  source?: string;
+}) {
+  const p = Math.min(100, Math.max(0, percent));
+  const tone = toneFor(p);
+  const remaining = Math.max(0, Math.round(limit - used));
+  return (
+    <div className="period-bar">
+      <div className="quota-head">
+        <span className="quota-title">
+          {title}
+          {source === "tracked" ? (
+            <span className="source-tag" title="API has no weekly endpoint; tracked locally this ISO week">
+              {" "}
+              tracked
+            </span>
+          ) : null}
+        </span>
+        <span className={`quota-percent ${tone}`}>{p.toFixed(1)}%</span>
+      </div>
+      <div className="quota-bar" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100}>
+        <div className={`quota-fill ${tone}`} style={{ width: `${p}%` }} />
+      </div>
+      <div className="quota-meta">
+        <span>
+          <strong>{Math.round(used).toLocaleString()}</strong>
+          {" / "}
+          {Math.round(limit).toLocaleString()} credits
+          <span className="muted"> · {remaining.toLocaleString()} left</span>
+        </span>
+      </div>
+      <div className="quota-reset">
+        <span>
+          Resets: <strong>{formatWhen(resetsAt)}</strong>
+          {typeof daysLeft === "number" ? <span className="muted"> · {daysLeft}d left</span> : null}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function QuotaProgress({ account }: { account: AccountSummary }) {
   const q = account.quota;
-  const percent = Math.min(100, Math.max(0, q?.percentUsed ?? 0));
-  const used = q ? Math.round(q.used) : null;
-  const limit = q ? Math.round(q.monthlyLimit) : null;
-  const remaining = used != null && limit != null ? Math.max(0, limit - used) : null;
-  const tone = percent >= 90 ? "danger" : percent >= 70 ? "warn" : "ok";
-  const periodLabel = q?.periodLabel || (q?.periodKind === "weekly" ? "Weekly" : "Monthly");
-  const isWeekly = (q?.periodKind || "").toLowerCase() === "weekly";
   const plan = account.subscriptionTier || (account.tier != null ? `tier ${account.tier}` : null);
+
+  const weekly = q?.weekly;
+  const monthly =
+    q?.monthly ??
+    (q
+      ? {
+          kind: "monthly",
+          label: "Monthly",
+          used: q.used,
+          limit: q.monthlyLimit,
+          percentUsed: q.percentUsed,
+          periodStart: q.billingPeriodStart,
+          periodEnd: q.billingPeriodEnd,
+          resetsAt: q.resetsAt || q.billingPeriodEnd,
+          daysUntilReset: q.daysUntilReset ?? 0,
+          source: "api",
+        }
+      : null);
 
   return (
     <div className="quota-block">
@@ -48,49 +120,32 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
         </span>
       </div>
 
-      <div className="quota-head">
-        <span className="quota-title">
-          {periodLabel} quota
-          {isWeekly ? " (week)" : " (month)"}
-        </span>
-        <span className={`quota-percent ${tone}`}>{q ? `${percent.toFixed(1)}%` : "—"}</span>
-      </div>
-      <div
-        className="quota-bar"
-        role="progressbar"
-        aria-valuenow={percent}
-        aria-valuemin={0}
-        aria-valuemax={100}
-      >
-        <div className={`quota-fill ${tone}`} style={{ width: `${percent}%` }} />
-      </div>
-      <div className="quota-meta">
-        {q ? (
-          <>
-            <span>
-              <strong>{used?.toLocaleString()}</strong>
-              {" / "}
-              {limit?.toLocaleString()} credits
-              {remaining != null ? (
-                <span className="muted"> · {remaining.toLocaleString()} left</span>
-              ) : null}
-            </span>
-          </>
-        ) : (
-          <span className="muted">No quota data — click Refresh</span>
-        )}
-      </div>
-      {q && (
-        <div className="quota-reset">
-          <span>
-            Period: {formatWhen(q.billingPeriodStart)} → {formatWhen(q.billingPeriodEnd || q.resetsAt)}
-          </span>
-          <span>
-            Resets: <strong>{formatWhen(q.resetsAt || q.billingPeriodEnd)}</strong>
-            {typeof q.daysUntilReset === "number" ? (
-              <span className="muted"> · {q.daysUntilReset}d left</span>
-            ) : null}
-          </span>
+      {!q ? (
+        <span className="muted">No quota data — click Refresh</span>
+      ) : (
+        <div className="period-stack">
+          {weekly && (
+            <PeriodBar
+              title="Weekly quota"
+              used={weekly.used}
+              limit={weekly.limit}
+              percent={weekly.percentUsed}
+              resetsAt={weekly.resetsAt || weekly.periodEnd}
+              daysLeft={weekly.daysUntilReset}
+              source={weekly.source}
+            />
+          )}
+          {monthly && (
+            <PeriodBar
+              title="Monthly quota"
+              used={monthly.used}
+              limit={monthly.limit}
+              percent={monthly.percentUsed}
+              resetsAt={monthly.resetsAt || monthly.periodEnd}
+              daysLeft={monthly.daysUntilReset}
+              source={monthly.source}
+            />
+          )}
         </div>
       )}
     </div>
