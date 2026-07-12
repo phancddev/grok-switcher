@@ -6,6 +6,12 @@ export type QuotaInfo = {
   billingPeriodEnd: string;
   percentUsed: number;
   fetchedAt: string;
+  /** "weekly" | "monthly" */
+  periodKind?: string;
+  /** "Weekly" | "Monthly" */
+  periodLabel?: string;
+  daysUntilReset?: number;
+  resetsAt?: string;
 };
 
 export type AccountSummary = {
@@ -19,6 +25,10 @@ export type AccountSummary = {
   createdAt?: string | null;
   quota?: QuotaInfo | null;
   tier?: number | null;
+  /** e.g. "GrokPro" */
+  subscriptionTier?: string | null;
+  /** Plan end date if API provides it (often null) */
+  planExpiresAt?: string | null;
 };
 
 export type Settings = {

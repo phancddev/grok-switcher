@@ -299,7 +299,20 @@ fn finalize_import(auth: &AuthFile, label: Option<String>) -> AppResult<(String,
         if let Ok(quota) = crate::billing::fetch_quota_for_token(&entry.key) {
             meta.quota = Some(quota);
         }
-        if let Ok(user) = crate::billing::fetch_user_for_token(&entry.key) {
+        // Prefer subscription-enriched user payload for plan name
+        if let Ok(user) = crate::billing::fetch_subscription_for_token(&entry.key) {
+            if let Some(email) = user.email.clone() {
+                meta.email = email;
+            }
+            if user.first_name.is_some() {
+                meta.first_name = user.first_name.clone();
+            }
+            if user.last_name.is_some() {
+                meta.last_name = user.last_name.clone();
+            }
+            meta.subscription_tier = user.subscription_tiers.clone();
+            meta.plan_expires_at = crate::billing::plan_expires_from_user(&user);
+        } else if let Ok(user) = crate::billing::fetch_user_for_token(&entry.key) {
             if let Some(email) = user.email {
                 meta.email = email;
             }

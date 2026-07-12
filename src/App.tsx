@@ -11,14 +11,19 @@ function displayName(a: AccountSummary): string {
   return parts || a.email;
 }
 
-function periodLabel(a: AccountSummary): string {
-  const q = a.quota;
-  if (!q?.billingPeriodEnd) return "";
+function formatWhen(iso?: string | null): string {
+  if (!iso) return "—";
   try {
-    const end = new Date(q.billingPeriodEnd);
-    return `Resets ${end.toLocaleDateString()}`;
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
-    return `Period ends ${q.billingPeriodEnd}`;
+    return iso;
   }
 }
 
@@ -29,16 +34,34 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
   const limit = q ? Math.round(q.monthlyLimit) : null;
   const remaining = used != null && limit != null ? Math.max(0, limit - used) : null;
   const tone = percent >= 90 ? "danger" : percent >= 70 ? "warn" : "ok";
+  const periodLabel = q?.periodLabel || (q?.periodKind === "weekly" ? "Weekly" : "Monthly");
+  const isWeekly = (q?.periodKind || "").toLowerCase() === "weekly";
+  const plan = account.subscriptionTier || (account.tier != null ? `tier ${account.tier}` : null);
 
   return (
     <div className="quota-block">
-      <div className="quota-head">
-        <span className="quota-title">Quota</span>
-        <span className={`quota-percent ${tone}`}>
-          {q ? `${percent.toFixed(1)}%` : "—"}
+      <div className="plan-row">
+        <span className="plan-badge">{plan ? plan : "Plan unknown"}</span>
+        <span className="muted plan-expiry">
+          Plan expires:{" "}
+          {account.planExpiresAt ? formatWhen(account.planExpiresAt) : "not provided by API"}
         </span>
       </div>
-      <div className="quota-bar" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+
+      <div className="quota-head">
+        <span className="quota-title">
+          {periodLabel} quota
+          {isWeekly ? " (week)" : " (month)"}
+        </span>
+        <span className={`quota-percent ${tone}`}>{q ? `${percent.toFixed(1)}%` : "—"}</span>
+      </div>
+      <div
+        className="quota-bar"
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
         <div className={`quota-fill ${tone}`} style={{ width: `${percent}%` }} />
       </div>
       <div className="quota-meta">
@@ -48,16 +71,28 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
               <strong>{used?.toLocaleString()}</strong>
               {" / "}
               {limit?.toLocaleString()} credits
-            </span>
-            <span className="muted">
-              {remaining != null ? `${remaining.toLocaleString()} left` : ""}
-              {periodLabel(account) ? ` · ${periodLabel(account)}` : ""}
+              {remaining != null ? (
+                <span className="muted"> · {remaining.toLocaleString()} left</span>
+              ) : null}
             </span>
           </>
         ) : (
           <span className="muted">No quota data — click Refresh</span>
         )}
       </div>
+      {q && (
+        <div className="quota-reset">
+          <span>
+            Period: {formatWhen(q.billingPeriodStart)} → {formatWhen(q.billingPeriodEnd || q.resetsAt)}
+          </span>
+          <span>
+            Resets: <strong>{formatWhen(q.resetsAt || q.billingPeriodEnd)}</strong>
+            {typeof q.daysUntilReset === "number" ? (
+              <span className="muted"> · {q.daysUntilReset}d left</span>
+            ) : null}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -310,7 +345,12 @@ export default function App() {
                   <div className="card-title">
                     <span className="name">{displayName(a)}</span>
                     {a.isActive && <span className="badge">Active</span>}
-                    {a.tier != null && <span className="badge muted">tier {a.tier}</span>}
+                    {a.subscriptionTier && (
+                      <span className="badge plan">{a.subscriptionTier}</span>
+                    )}
+                    {a.tier != null && !a.subscriptionTier && (
+                      <span className="badge muted">tier {a.tier}</span>
+                    )}
                   </div>
                   <div className="email">{a.email}</div>
                   {a.label && displayName(a) !== a.email && (

@@ -34,6 +34,8 @@ fn summary_from_import(user_id: String, meta: crate::types::AccountMeta) -> Acco
         created_at: meta.created_at,
         quota: meta.quota,
         tier: meta.tier,
+        subscription_tier: meta.subscription_tier,
+        plan_expires_at: meta.plan_expires_at,
     }
 }
 

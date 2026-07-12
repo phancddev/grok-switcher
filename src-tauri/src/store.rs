@@ -89,6 +89,8 @@ pub fn import_auth_as_account(auth: &AuthFile) -> AppResult<(String, AccountMeta
         created_at: entry.create_time.clone().or(Some(now)),
         quota: None,
         tier: jwt_tier(&entry.key),
+        subscription_tier: None,
+        plan_expires_at: None,
     };
     save_account_snapshot(&user_id, auth)?;
     Ok((user_id, meta))
@@ -122,6 +124,8 @@ pub fn list_summaries(settings: &Settings) -> AppResult<Vec<AccountSummary>> {
             created_at: m.created_at.clone(),
             quota: m.quota.clone(),
             tier: m.tier,
+            subscription_tier: m.subscription_tier.clone(),
+            plan_expires_at: m.plan_expires_at.clone(),
         })
         .collect();
 
@@ -170,6 +174,23 @@ pub fn update_quota(user_id: &str, quota: QuotaInfo, tier: Option<i64>) -> AppRe
         if tier.is_some() {
             m.tier = tier;
         }
+        save_meta(&meta)?;
+    }
+    Ok(())
+}
+
+pub fn update_subscription(
+    user_id: &str,
+    subscription_tier: Option<String>,
+    plan_expires_at: Option<String>,
+) -> AppResult<()> {
+    let mut meta = load_meta()?;
+    if let Some(m) = meta.accounts.get_mut(user_id) {
+        if subscription_tier.is_some() {
+            m.subscription_tier = subscription_tier;
+        }
+        // Always write expiry (may be None — API currently does not provide it)
+        m.plan_expires_at = plan_expires_at;
         save_meta(&meta)?;
     }
     Ok(())

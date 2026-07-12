@@ -5,12 +5,26 @@ use std::collections::HashMap;
 #[serde(rename_all = "camelCase")]
 pub struct QuotaInfo {
     pub used: f64,
+    /// Limit for the current billing period (field name from API is monthlyLimit
+    /// even when the period is weekly).
     pub monthly_limit: f64,
     pub on_demand_cap: f64,
     pub billing_period_start: String,
     pub billing_period_end: String,
     pub percent_used: f64,
     pub fetched_at: String,
+    /// "weekly" | "monthly" — inferred from period length or API currentPeriod
+    #[serde(default)]
+    pub period_kind: String,
+    /// Human label e.g. "Weekly" / "Monthly"
+    #[serde(default)]
+    pub period_label: String,
+    /// Days remaining until period reset (floor, non-negative)
+    #[serde(default)]
+    pub days_until_reset: i64,
+    /// ISO reset time (= billing_period_end)
+    #[serde(default)]
+    pub resets_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +40,10 @@ pub struct AccountSummary {
     pub created_at: Option<String>,
     pub quota: Option<QuotaInfo>,
     pub tier: Option<i64>,
+    /// e.g. "GrokPro" from /v1/user?include=subscription
+    pub subscription_tier: Option<String>,
+    /// Plan expiry if ever provided by API (currently usually null)
+    pub plan_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +57,10 @@ pub struct AccountMeta {
     pub created_at: Option<String>,
     pub quota: Option<QuotaInfo>,
     pub tier: Option<i64>,
+    #[serde(default)]
+    pub subscription_tier: Option<String>,
+    #[serde(default)]
+    pub plan_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

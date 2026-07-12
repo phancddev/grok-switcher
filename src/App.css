@@ -303,6 +303,50 @@ input {
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.plan-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.plan-badge {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(110, 168, 254, 0.25), rgba(127, 217, 154, 0.2));
+  color: var(--text);
+  border: 1px solid rgba(110, 168, 254, 0.35);
+}
+
+.plan-expiry {
+  font-size: 0.8rem;
+}
+
+.badge.plan {
+  background: rgba(127, 217, 154, 0.16);
+  color: #9ee6b0;
+}
+
+.quota-reset {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 8px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.quota-reset strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .quota-head {
   display: flex;
   justify-content: space-between;
