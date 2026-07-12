@@ -41,6 +41,7 @@ function PeriodBar({
   resetsAt,
   daysLeft,
   source,
+  percentOnly,
 }: {
   title: string;
   used: number;
@@ -49,6 +50,8 @@ function PeriodBar({
   resetsAt?: string;
   daysLeft?: number;
   source?: string;
+  /** When API only returns %, show percent usage (not absolute credits) */
+  percentOnly?: boolean;
 }) {
   const p = Math.min(100, Math.max(0, percent));
   const tone = toneFor(p);
@@ -59,9 +62,14 @@ function PeriodBar({
         <span className="quota-title">
           {title}
           {source === "tracked" ? (
-            <span className="source-tag" title="API has no weekly endpoint; tracked locally this ISO week">
+            <span className="source-tag" title="Estimated / tracked locally">
               {" "}
               tracked
+            </span>
+          ) : source === "api" ? (
+            <span className="source-tag api" title="From Grok billing API">
+              {" "}
+              api
             </span>
           ) : null}
         </span>
@@ -71,12 +79,19 @@ function PeriodBar({
         <div className={`quota-fill ${tone}`} style={{ width: `${p}%` }} />
       </div>
       <div className="quota-meta">
-        <span>
-          <strong>{Math.round(used).toLocaleString()}</strong>
-          {" / "}
-          {Math.round(limit).toLocaleString()} credits
-          <span className="muted"> · {remaining.toLocaleString()} left</span>
-        </span>
+        {percentOnly ? (
+          <span>
+            <strong>{p.toFixed(1)}%</strong> of weekly allowance used
+            <span className="muted"> · {(100 - p).toFixed(1)}% left</span>
+          </span>
+        ) : (
+          <span>
+            <strong>{Math.round(used).toLocaleString()}</strong>
+            {" / "}
+            {Math.round(limit).toLocaleString()} credits
+            <span className="muted"> · {remaining.toLocaleString()} left</span>
+          </span>
+        )}
       </div>
       <div className="quota-reset">
         <span>
@@ -133,6 +148,7 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
               resetsAt={weekly.resetsAt || weekly.periodEnd}
               daysLeft={weekly.daysUntilReset}
               source={weekly.source}
+              percentOnly={weekly.limit === 100 && weekly.source === "api"}
             />
           )}
           {monthly && (

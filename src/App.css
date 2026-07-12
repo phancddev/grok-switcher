@@ -368,6 +368,10 @@ input {
   opacity: 0.9;
 }
 
+.source-tag.api {
+  color: #7fd99a;
+}
+
 .quota-head {
   display: flex;
   justify-content: space-between;
