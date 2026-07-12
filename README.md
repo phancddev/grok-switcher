@@ -76,3 +76,28 @@ On Windows, `~` is `%USERPROFILE%`. You can override the Grok home with the `GRO
 ## License
 
 Private / use as you like unless otherwise stated.
+
+## Auto Updates
+
+Grok Switcher checks for updates on launch (same idea as [Codex Switcher](https://github.com/Lampese/codex-switcher)):
+
+1. **In-app install** via `tauri-plugin-updater` when GitHub Releases contain a signed `latest.json`.
+2. **Fallback** via the GitHub Releases API: shows “Update available” and opens the release page to download.
+
+### One-time signing key setup (for install-from-app)
+
+```bash
+# Generate keypair (private key must stay secret)
+npx tauri signer generate -w ~/.tauri/grok-switcher.key
+
+# Put the *public* key into src-tauri/tauri.conf.json → plugins.updater.pubkey
+# Put the *private* key into GitHub Actions secrets:
+#   TAURI_SIGNING_PRIVATE_KEY          (file contents)
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (if you set one)
+```
+
+Publish a versioned release (tag `v0.x.y`). CI builds installers and attaches `latest.json`. The app endpoint is:
+
+`https://github.com/phancddev/grok-switcher/releases/latest/download/latest.json`
+
+Without the private key secret, builds still work; the app falls back to the “Download” button on new tags.

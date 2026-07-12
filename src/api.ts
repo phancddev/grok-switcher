@@ -62,3 +62,18 @@ export const saveSettings = (newSettings: Settings) =>
 
 export const resolveGrokBinary = () =>
   invoke<string | null>("resolve_grok_binary");
+
+export type GithubUpdateInfo = {
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseUrl: string;
+  releaseNotes?: string | null;
+  publishedAt?: string | null;
+  tagName?: string | null;
+};
+
+export const getAppVersion = () => invoke<string>("get_app_version");
+
+export const checkGithubUpdate = () =>
+  invoke<GithubUpdateInfo>("check_github_update");

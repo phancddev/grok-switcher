@@ -776,6 +776,63 @@ input {
   margin-top: 8px;
 }
 
+/* ── Update banner (codex-style) ─────────────────────────────── */
+
+.update-banner {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  width: min(480px, 92vw);
+  pointer-events: none;
+}
+
+.update-card {
+  pointer-events: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+
+.update-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.update-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.update-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-notes {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.update-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  align-items: center;
+}
+
 @media (max-width: 720px) {
   .header-inner {
     flex-direction: column;

@@ -5,6 +5,7 @@ use crate::paths;
 use crate::settings::{self, Settings};
 use crate::store;
 use crate::types::{AccountSummary, QuotaInfo};
+use crate::update::{self, GithubUpdateInfo};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,4 +165,17 @@ pub fn resolve_grok_binary() -> AppResult<Option<String>> {
         Ok(p) => Ok(Some(p.display().to_string())),
         Err(_) => Ok(None),
     }
+}
+
+#[tauri::command]
+pub fn get_app_version() -> String {
+    update::app_version()
+}
+
+/// Always-available GitHub Releases check (no signing required).
+#[tauri::command]
+pub async fn check_github_update() -> AppResult<GithubUpdateInfo> {
+    tauri::async_runtime::spawn_blocking(update::check_github_latest)
+        .await
+        .map_err(|e| crate::error::AppError::msg(format!("Update check task failed: {e}")))?
 }

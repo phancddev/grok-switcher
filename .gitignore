@@ -36,6 +36,11 @@ Thumbs.db
 .env.*
 !.env.example
 
+# Tauri updater signing private keys (never commit)
+.tauri-keys/
+*.key
+!*.key.pub
+
 # Misc
 *.tsbuildinfo
 .cargo-ok

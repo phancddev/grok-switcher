@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import type { LoginStatusEvent } from "./api";
 import type { AccountSummary, Settings } from "./types";
+import { UpdateChecker } from "./components/UpdateChecker";
 import "./App.css";
 
 function displayName(a: AccountSummary): string {
@@ -455,6 +456,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <UpdateChecker />
       <header className="header">
         <div className="header-inner">
           <div className="brand">

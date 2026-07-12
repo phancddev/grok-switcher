@@ -161,6 +161,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for signed auto-updates (tauri-plugin-updater).
+          # Generate: npx tauri signer generate -w ~/.tauri/grok-switcher.key
+          # Then set secrets TAURI_SIGNING_PRIVATE_KEY (+ optional PASSWORD).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.version.outputs.tag }}
           releaseName: Grok Switcher ${{ needs.version.outputs.tag }}
@@ -183,10 +188,14 @@ jobs:
             ### Data locations
             - App store: `~/.grok-switcher/` (Windows: `%USERPROFILE%\.grok-switcher\`)
             - Active Grok auth: `~/.grok/auth.json` (or `$GROK_HOME/auth.json`)
+
+            ### Auto-update
+            Release includes `latest.json` for the in-app updater when signing keys are configured.
           releaseDraft: ${{ needs.version.outputs.draft == 'true' }}
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }}
-          includeUpdaterJson: false
+          includeUpdaterJson: true
+          updaterJsonKeepUniversal: true
 
   notify:
     needs: [version, build]
