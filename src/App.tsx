@@ -45,7 +45,9 @@ export default function App() {
       const path = await api.resolveGrokBinary();
       setGrokPath(path);
     } catch (e) {
-      setError(String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg.replace(/^Error:\s*/, ""));
+      setAccounts([]);
     } finally {
       setLoading(false);
     }

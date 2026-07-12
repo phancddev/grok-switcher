@@ -1,5 +1,26 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import type { AccountSummary, QuotaInfo, Settings } from "./types";
+
+/**
+ * Safe wrapper around Tauri invoke.
+ * When the Rust backend failed to compile (disk full, etc.) or the UI is
+ * opened in a plain browser, `window.__TAURI_INTERNALS__` is missing and
+ * raw `invoke` throws: Cannot read properties of undefined (reading 'invoke').
+ */
+async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: unknown } })
+    .__TAURI_INTERNALS__;
+
+  if (!isTauri() || !internals?.invoke) {
+    throw new Error(
+      "Tauri backend is not available. Run with `npm run tauri dev` (not `npm run dev` alone). " +
+        "If you already did, the Rust side may have failed to build — check the terminal for " +
+        "`No space left on device` or other compile errors, free disk space, then restart.",
+    );
+  }
+
+  return tauriInvoke<T>(cmd, args);
+}
 
 export const listAccounts = () => invoke<AccountSummary[]>("list_accounts");
 
