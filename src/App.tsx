@@ -168,6 +168,18 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
   );
 }
 
+type ThemeMode = "light" | "dark" | "system";
+
+function resolveTheme(mode: ThemeMode): "light" | "dark" {
+  if (mode === "light" || mode === "dark") return mode;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyTheme(mode: ThemeMode) {
+  const resolved = resolveTheme(mode);
+  document.documentElement.setAttribute("data-theme", resolved);
+}
+
 export default function App() {
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -177,6 +189,10 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings>({});
   const [grokPath, setGrokPath] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    const saved = localStorage.getItem("gs-theme") as ThemeMode | null;
+    return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
+  });
 
   // Add-account modal
   const [showAdd, setShowAdd] = useState(false);
@@ -206,6 +222,24 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    applyTheme(theme);
+    localStorage.setItem("gs-theme", theme);
+    if (theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyTheme("system");
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [theme]);
+
+  const cycleTheme = () => {
+    setTheme((t) => (t === "system" ? "light" : t === "light" ? "dark" : "system"));
+  };
+
+  const themeIcon = theme === "dark" ? "◐" : theme === "light" ? "○" : "◑";
+  const themeTitle =
+    theme === "dark" ? "Dark" : theme === "light" ? "Light" : "System";
 
   // Listen for login-status events while adding
   useEffect(() => {
@@ -355,6 +389,15 @@ export default function App() {
           </div>
         </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="btn ghost theme-toggle"
+            onClick={cycleTheme}
+            title={`Theme: ${themeTitle} (click to cycle)`}
+            aria-label={`Theme ${themeTitle}`}
+          >
+            {themeIcon}
+          </button>
           <button type="button" className="btn ghost" onClick={() => void openSettings()} disabled={!!busy}>
             Settings
           </button>
