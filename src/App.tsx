@@ -27,9 +27,28 @@ function formatWhen(iso?: string | null): string {
   }
 }
 
-function toneFor(percent: number): "ok" | "warn" | "danger" {
-  if (percent >= 90) return "danger";
-  if (percent >= 70) return "warn";
+/** Relative reset like codex-switcher: "2h 15m", "now" */
+function formatResetRelative(iso?: string | null): string {
+  if (!iso) return "";
+  const end = new Date(iso).getTime();
+  if (Number.isNaN(end)) return "";
+  const diff = Math.floor((end - Date.now()) / 1000);
+  if (diff <= 0) return "now";
+  if (diff < 60) return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) {
+    const h = Math.floor(diff / 3600);
+    const m = Math.floor((diff % 3600) / 60);
+    return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+  const d = Math.floor(diff / 86400);
+  return `${d}d`;
+}
+
+/** Color by remaining % (green = plenty left) — codex style */
+function toneForRemaining(remainingPercent: number): "ok" | "warn" | "danger" {
+  if (remainingPercent <= 10) return "danger";
+  if (remainingPercent <= 30) return "warn";
   return "ok";
 }
 
@@ -39,8 +58,6 @@ function PeriodBar({
   limit,
   percent,
   resetsAt,
-  daysLeft,
-  source,
   percentOnly,
 }: {
   title: string;
@@ -48,65 +65,49 @@ function PeriodBar({
   limit: number;
   percent: number;
   resetsAt?: string;
-  daysLeft?: number;
-  source?: string;
-  /** When API only returns %, show percent usage (not absolute credits) */
   percentOnly?: boolean;
 }) {
-  const p = Math.min(100, Math.max(0, percent));
-  const tone = toneFor(p);
-  const remaining = Math.max(0, Math.round(limit - used));
+  const usedP = Math.min(100, Math.max(0, percent));
+  const remainingP = Math.max(0, 100 - usedP);
+  const tone = toneForRemaining(remainingP);
+  const resetRel = formatResetRelative(resetsAt);
+  const exact = formatWhen(resetsAt);
+
   return (
-    <div className="period-bar">
-      <div className="quota-head">
-        <span className="quota-title">
-          {title}
-          {source === "tracked" ? (
-            <span className="source-tag" title="Estimated / tracked locally">
+    <div className="usage-bar">
+      <div className="usage-bar-row">
+        <span className="usage-bar-label">{title}</span>
+        <span className="usage-bar-meta">
+          <strong className={`usage-left ${tone}`}>{remainingP.toFixed(0)}% left</strong>
+          {resetRel ? (
+            <span className="muted">
               {" "}
-              tracked
-            </span>
-          ) : source === "api" ? (
-            <span className="source-tag api" title="From Grok billing API">
-              {" "}
-              api
+              · resets {resetRel}
+              {exact !== "—" ? ` (${exact})` : ""}
             </span>
           ) : null}
         </span>
-        <span className={`quota-percent ${tone}`}>{p.toFixed(1)}%</span>
       </div>
-      <div className="quota-bar" role="progressbar" aria-valuenow={p} aria-valuemin={0} aria-valuemax={100}>
-        <div className={`quota-fill ${tone}`} style={{ width: `${p}%` }} />
+      <div
+        className="usage-track"
+        role="progressbar"
+        aria-valuenow={remainingP}
+        aria-valuemin={0}
+        aria-valuemax={100}
+      >
+        <div className={`usage-fill ${tone}`} style={{ width: `${remainingP}%` }} />
       </div>
-      <div className="quota-meta">
-        {percentOnly ? (
-          <span>
-            <strong>{p.toFixed(1)}%</strong> of weekly allowance used
-            <span className="muted"> · {(100 - p).toFixed(1)}% left</span>
-          </span>
-        ) : (
-          <span>
-            <strong>{Math.round(used).toLocaleString()}</strong>
-            {" / "}
-            {Math.round(limit).toLocaleString()} credits
-            <span className="muted"> · {remaining.toLocaleString()} left</span>
-          </span>
-        )}
-      </div>
-      <div className="quota-reset">
-        <span>
-          Resets: <strong>{formatWhen(resetsAt)}</strong>
-          {typeof daysLeft === "number" ? <span className="muted"> · {daysLeft}d left</span> : null}
-        </span>
-      </div>
+      {!percentOnly && limit > 0 && limit !== 100 && (
+        <div className="usage-sub">
+          {Math.round(used).toLocaleString()} / {Math.round(limit).toLocaleString()} credits used
+        </div>
+      )}
     </div>
   );
 }
 
 function QuotaProgress({ account }: { account: AccountSummary }) {
   const q = account.quota;
-  const plan = account.subscriptionTier || (account.tier != null ? `tier ${account.tier}` : null);
-
   const weekly = q?.weekly;
   const monthly =
     q?.monthly ??
@@ -125,46 +126,117 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
         }
       : null);
 
-  return (
-    <div className="quota-block">
-      <div className="plan-row">
-        <span className="plan-badge">{plan ? plan : "Plan unknown"}</span>
-        <span className="muted plan-expiry">
-          Plan expires:{" "}
-          {account.planExpiresAt ? formatWhen(account.planExpiresAt) : "not provided by API"}
-        </span>
-      </div>
+  if (!q) {
+    return <div className="usage-empty muted">No rate limit data — click Refresh</div>;
+  }
 
-      {!q ? (
-        <span className="muted">No quota data — click Refresh</span>
-      ) : (
-        <div className="period-stack">
-          {weekly && (
-            <PeriodBar
-              title="Weekly quota"
-              used={weekly.used}
-              limit={weekly.limit}
-              percent={weekly.percentUsed}
-              resetsAt={weekly.resetsAt || weekly.periodEnd}
-              daysLeft={weekly.daysUntilReset}
-              source={weekly.source}
-              percentOnly={weekly.limit === 100 && weekly.source === "api"}
-            />
-          )}
-          {monthly && (
-            <PeriodBar
-              title="Monthly quota"
-              used={monthly.used}
-              limit={monthly.limit}
-              percent={monthly.percentUsed}
-              resetsAt={monthly.resetsAt || monthly.periodEnd}
-              daysLeft={monthly.daysUntilReset}
-              source={monthly.source}
-            />
-          )}
-        </div>
+  return (
+    <div className="usage-stack">
+      {weekly && (
+        <PeriodBar
+          title="Weekly limit"
+          used={weekly.used}
+          limit={weekly.limit}
+          percent={weekly.percentUsed}
+          resetsAt={weekly.resetsAt || weekly.periodEnd}
+          percentOnly={weekly.limit === 100 && weekly.source === "api"}
+        />
+      )}
+      {monthly && (
+        <PeriodBar
+          title="Monthly limit"
+          used={monthly.used}
+          limit={monthly.limit}
+          percent={monthly.percentUsed}
+          resetsAt={monthly.resetsAt || monthly.periodEnd}
+        />
       )}
     </div>
+  );
+}
+
+function AccountCardView({
+  account,
+  busy,
+  onSwitch,
+  onRefresh,
+  onRemove,
+}: {
+  account: AccountSummary;
+  busy: string | null;
+  onSwitch: (id: string) => void;
+  onRefresh: (id: string) => void;
+  onRemove: (id: string, name: string) => void;
+}) {
+  const name = displayName(account);
+  const plan = account.subscriptionTier || (account.tier != null ? `Tier ${account.tier}` : "Unknown");
+  const switching = busy === `switch-${account.userId}`;
+  const refreshing = busy === `quota-${account.userId}`;
+
+  return (
+    <article className={`account-card ${account.isActive ? "is-active" : ""}`}>
+      <div className="account-card-top">
+        <div className="account-card-identity">
+          <div className="account-card-name-row">
+            {account.isActive && (
+              <span className="active-dot" title="Active">
+                <span className="active-dot-ping" />
+                <span className="active-dot-core" />
+              </span>
+            )}
+            <h3 className="account-card-name">{name}</h3>
+          </div>
+          <p className="account-card-email">{account.email}</p>
+        </div>
+        <div className="account-card-badges">
+          <span className="plan-chip">{plan}</span>
+          {account.isActive && <span className="active-chip">Active</span>}
+        </div>
+      </div>
+
+      <div className="account-card-usage">
+        <QuotaProgress account={account} />
+      </div>
+
+      {account.planExpiresAt && (
+        <div className="account-card-submeta muted">Until {formatWhen(account.planExpiresAt)}</div>
+      )}
+
+      <div className="account-card-actions">
+        {account.isActive ? (
+          <button type="button" className="btn btn-active-state" disabled>
+            ✓ Active
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-switch"
+            disabled={!!busy}
+            onClick={() => onSwitch(account.userId)}
+          >
+            {switching ? "Switching…" : "Switch"}
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn btn-icon"
+          disabled={!!busy}
+          title="Refresh usage"
+          onClick={() => onRefresh(account.userId)}
+        >
+          <span className={refreshing ? "spin" : undefined}>↻</span>
+        </button>
+        <button
+          type="button"
+          className="btn btn-icon btn-danger-soft"
+          disabled={!!busy}
+          title="Remove account"
+          onClick={() => onRemove(account.userId, name)}
+        >
+          ✕
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -378,69 +450,80 @@ export default function App() {
       setInfo("Settings saved");
     });
 
+  const activeAccounts = accounts.filter((a) => a.isActive);
+  const otherAccounts = accounts.filter((a) => !a.isActive);
+
   return (
     <div className="app">
       <header className="header">
-        <div className="brand">
-          <img className="brand-logo" src="/logo.png" alt="Grok Switcher" width={40} height={40} />
-          <div>
-            <h1>Grok Switcher</h1>
-            <p className="subtitle">Manage Grok Build accounts · switch · check quota</p>
+        <div className="header-inner">
+          <div className="brand">
+            <img className="brand-logo" src="/logo.png" alt="Grok Switcher" width={40} height={40} />
+            <div>
+              <h1>Grok Switcher</h1>
+              <p className="subtitle">Switch accounts · monitor weekly &amp; monthly quota</p>
+            </div>
           </div>
-        </div>
-        <div className="header-actions">
-          <button
-            type="button"
-            className="btn theme-toggle"
-            onClick={cycleTheme}
-            title={`Theme: ${themeTitle} (click to cycle light/dark)`}
-            aria-label={`Theme ${themeTitle}`}
-          >
-            {/* Sun icon — matches app theme control style */}
-            <svg
-              className="theme-icon"
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              xmlns="http://www.w3.org/2000/svg"
-              aria-hidden="true"
+          <div className="header-actions">
+            <button
+              type="button"
+              className="btn theme-toggle"
+              onClick={cycleTheme}
+              title={`Theme: ${themeTitle} (click to cycle)`}
+              aria-label={`Theme ${themeTitle}`}
             >
-              <circle cx="12" cy="12" r="4" fill="currentColor" />
-              <g stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
-                <line x1="12" y1="2" x2="12" y2="4.5" />
-                <line x1="12" y1="19.5" x2="12" y2="22" />
-                <line x1="2" y1="12" x2="4.5" y2="12" />
-                <line x1="19.5" y1="12" x2="22" y2="12" />
-                <line x1="4.93" y1="4.93" x2="6.7" y2="6.7" />
-                <line x1="17.3" y1="17.3" x2="19.07" y2="19.07" />
-                <line x1="4.93" y1="19.07" x2="6.7" y2="17.3" />
-                <line x1="17.3" y1="6.7" x2="19.07" y2="4.93" />
-              </g>
-            </svg>
-          </button>
-          <button type="button" className="btn ghost" onClick={() => void openSettings()} disabled={!!busy}>
-            Settings
-          </button>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() => void onRefreshQuota()}
-            disabled={!!busy || accounts.length === 0}
-          >
-            Refresh quotas
-          </button>
-          <button type="button" className="btn secondary" onClick={() => void onImport()} disabled={!!busy}>
-            Import current
-          </button>
-          <button type="button" className="btn primary" onClick={openAddModal} disabled={!!busy}>
-            Add account
-          </button>
+              <svg
+                className="theme-icon"
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="4" fill="currentColor" />
+                <g stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+                  <line x1="12" y1="2" x2="12" y2="4.5" />
+                  <line x1="12" y1="19.5" x2="12" y2="22" />
+                  <line x1="2" y1="12" x2="4.5" y2="12" />
+                  <line x1="19.5" y1="12" x2="22" y2="12" />
+                  <line x1="4.93" y1="4.93" x2="6.7" y2="6.7" />
+                  <line x1="17.3" y1="17.3" x2="19.07" y2="19.07" />
+                  <line x1="4.93" y1="19.07" x2="6.7" y2="17.3" />
+                  <line x1="17.3" y1="6.7" x2="19.07" y2="4.93" />
+                </g>
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="btn btn-icon"
+              onClick={() => void onRefreshQuota()}
+              disabled={!!busy || accounts.length === 0}
+              title="Refresh all quotas"
+            >
+              <span className={busy === "quota-all" ? "spin" : undefined}>↻</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-icon"
+              onClick={() => void openSettings()}
+              disabled={!!busy}
+              title="Settings"
+            >
+              ⚙
+            </button>
+            <button type="button" className="btn secondary" onClick={() => void onImport()} disabled={!!busy}>
+              Import
+            </button>
+            <button type="button" className="btn primary" onClick={openAddModal} disabled={!!busy}>
+              + Add account
+            </button>
+          </div>
         </div>
       </header>
 
       {(error || info) && (
-        <div className={`banner ${error ? "error" : "info"}`}>
+        <div className={`toast ${error ? "error" : "ok"}`}>
           <span>{error ?? info}</span>
           <button
             type="button"
@@ -457,90 +540,75 @@ export default function App() {
 
       <main className="main">
         {loading ? (
-          <div className="empty">Loading…</div>
+          <div className="empty-state">
+            <div className="spinner" />
+            <p className="muted">Loading accounts…</p>
+          </div>
         ) : accounts.length === 0 ? (
-          <div className="empty">
+          <div className="empty-state">
+            <div className="empty-icon">👤</div>
             <h2>No accounts yet</h2>
-            <p>
-              Click <strong>Add account</strong> to name an account and sign in with a copyable link,
-              or <strong>Import current</strong> for the session in <code>~/.grok/auth.json</code>.
+            <p className="muted">
+              Add a Grok Build account with device login, or import the session in{" "}
+              <code>~/.grok/auth.json</code>.
             </p>
             {!grokPath && (
-              <p className="warn">
-                Grok CLI not found. Open Settings and set the binary path (e.g.{" "}
-                <code>~/.grok/bin/grok</code>).
-              </p>
+              <p className="warn">Grok CLI not found — set the binary path in Settings.</p>
             )}
+            <button type="button" className="btn primary" onClick={openAddModal}>
+              + Add account
+            </button>
           </div>
         ) : (
-          <ul className="account-list">
-            {accounts.map((a) => (
-              <li key={a.userId} className={`card ${a.isActive ? "active" : ""}`}>
-                <div className="card-main">
-                  <div className="card-title">
-                    <span className="name">{displayName(a)}</span>
-                    {a.isActive && <span className="badge">Active</span>}
-                    {a.subscriptionTier && (
-                      <span className="badge plan">{a.subscriptionTier}</span>
-                    )}
-                    {a.tier != null && !a.subscriptionTier && (
-                      <span className="badge muted">tier {a.tier}</span>
-                    )}
-                  </div>
-                  <div className="email">{a.email}</div>
-                  {a.label && displayName(a) !== a.email && (
-                    <div className="email subtle-label">
-                      {a.firstName || a.lastName
-                        ? [a.firstName, a.lastName].filter(Boolean).join(" ")
-                        : null}
-                    </div>
-                  )}
-                  <QuotaProgress account={a} />
+          <div className="sections">
+            {activeAccounts.length > 0 && (
+              <section className="section">
+                <h2 className="section-title">Active account</h2>
+                <div className="card-grid card-grid-one">
+                  {activeAccounts.map((a) => (
+                    <AccountCardView
+                      key={a.userId}
+                      account={a}
+                      busy={busy}
+                      onSwitch={(id) => void onSwitch(id)}
+                      onRefresh={(id) => void onRefreshQuota(id)}
+                      onRemove={onRemove}
+                    />
+                  ))}
                 </div>
-                <div className="card-actions">
-                  {!a.isActive && (
-                    <button
-                      type="button"
-                      className="btn primary small"
-                      disabled={!!busy}
-                      onClick={() => void onSwitch(a.userId)}
-                    >
-                      {busy === `switch-${a.userId}` ? "…" : "Switch"}
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="btn ghost small"
-                    disabled={!!busy}
-                    onClick={() => void onRefreshQuota(a.userId)}
-                  >
-                    {busy === `quota-${a.userId}` ? "…" : "Refresh"}
-                  </button>
-                  <button
-                    type="button"
-                    className="btn danger small"
-                    disabled={!!busy}
-                    onClick={() => onRemove(a.userId, displayName(a))}
-                  >
-                    Remove
-                  </button>
+              </section>
+            )}
+            {otherAccounts.length > 0 && (
+              <section className="section">
+                <h2 className="section-title">Other accounts</h2>
+                <div className="card-grid">
+                  {otherAccounts.map((a) => (
+                    <AccountCardView
+                      key={a.userId}
+                      account={a}
+                      busy={busy}
+                      onSwitch={(id) => void onSwitch(id)}
+                      onRefresh={(id) => void onRefreshQuota(id)}
+                      onRemove={onRemove}
+                    />
+                  ))}
                 </div>
-              </li>
-            ))}
-          </ul>
+              </section>
+            )}
+          </div>
         )}
       </main>
 
       <footer className="footer">
         <span>
-          Store: <code>~/.grok-switcher</code>
+          Store <code>~/.grok-switcher</code>
         </span>
         <span>
-          Active auth: <code>~/.grok/auth.json</code>
+          Auth <code>~/.grok/auth.json</code>
         </span>
         {grokPath && (
           <span title={grokPath}>
-            CLI: <code>{grokPath}</code>
+            CLI <code>{grokPath}</code>
           </span>
         )}
       </footer>
