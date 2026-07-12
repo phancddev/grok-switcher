@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag (e.g. v0.1.1). Leave empty to use package version."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      is_release: ${{ steps.meta.outputs.is_release }}
+      draft: ${{ steps.meta.outputs.draft }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+            VERSION="${VERSION%%+*}"   # strip build metadata if present
+            IS_RELEASE=true
+            DRAFT=true
+            PRERELEASE=false
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
+            TAG="${{ inputs.tag }}"
+            VERSION="${TAG#v}"
+            VERSION="${VERSION%%+*}"
+            IS_RELEASE=true
+            DRAFT=true
+            PRERELEASE=false
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
+            # Push to main → draft pre-release (hyphen, not +, for clean GitHub tag URLs)
+            SHORT=$(git rev-parse --short HEAD)
+            VERSION="${PKG_VERSION}"
+            TAG="v${PKG_VERSION}-main.${SHORT}"
+            IS_RELEASE=true
+            DRAFT=true
+            PRERELEASE=true
+          else
+            VERSION="${PKG_VERSION}"
+            TAG="v${PKG_VERSION}"
+            IS_RELEASE=false
+            DRAFT=true
+            PRERELEASE=false
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "draft=${DRAFT}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${VERSION} is_release=${IS_RELEASE} draft=${DRAFT} prerelease=${PRERELEASE}"
+
+  build:
+    needs: version
+    if: needs.version.outputs.is_release == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS Apple Silicon (arm64) — DMG for drag-to-Applications
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin --bundles dmg,app
+            rust_target: aarch64-apple-darwin
+          # macOS Intel (x64)
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin --bundles dmg,app
+            rust_target: x86_64-apple-darwin
+          # Linux AppImage + deb
+          - platform: ubuntu-22.04
+            args: --bundles appimage,deb
+            rust_target: ""
+          # Windows NSIS (currentUser install mode from tauri.conf.json)
+          - platform: windows-latest
+            args: --bundles nsis
+            rust_target: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          shared-key: ${{ matrix.platform }}-${{ matrix.rust_target || 'host' }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Sync version into configs
+        shell: bash
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          # strip build metadata if any
+          CLEAN="${VERSION%%+*}"
+          node -e "
+            const fs=require('fs');
+            const v=process.argv[1];
+            const pkg=JSON.parse(fs.readFileSync('package.json','utf8'));
+            pkg.version=v;
+            fs.writeFileSync('package.json', JSON.stringify(pkg,null,2)+'\n');
+            const conf=JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8'));
+            conf.version=v;
+            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf,null,2)+'\n');
+            let cargo=fs.readFileSync('src-tauri/Cargo.toml','utf8');
+            cargo=cargo.replace(/^version = \".*\"/m, 'version = \"'+v+'\"');
+            fs.writeFileSync('src-tauri/Cargo.toml', cargo);
+            console.log('Synced version to', v);
+          " "$CLEAN"
+
+      - name: Build Tauri app & upload release assets
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.version.outputs.tag }}
+          releaseName: Grok Switcher ${{ needs.version.outputs.tag }}
+          releaseBody: |
+            ## Grok Switcher ${{ needs.version.outputs.tag }}
+
+            Portable multi-account switcher for **Grok Build**. Download the installer for your OS:
+
+            | OS | Artifact | Install |
+            |----|----------|---------|
+            | **macOS** (Apple Silicon) | `*-aarch64.dmg` | Open DMG → drag **Grok Switcher** to **Applications** |
+            | **macOS** (Intel) | `*-x64.dmg` | Open DMG → drag **Grok Switcher** to **Applications** |
+            | **Windows** | `*-setup.exe` (NSIS) | Run installer (per-user) — Start Menu shortcut |
+            | **Linux** | `.AppImage` | `chmod +x *.AppImage && ./Grok*.AppImage` |
+            | **Linux** | `.deb` | `sudo dpkg -i *.deb` |
+
+            ### Requirements
+            - [Grok Build CLI](https://grok.com) installed and on `PATH` (needed for **Add Account** / `grok login`)
+
+            ### Data locations
+            - App store: `~/.grok-switcher/` (Windows: `%USERPROFILE%\.grok-switcher\`)
+            - Active Grok auth: `~/.grok/auth.json` (or `$GROK_HOME/auth.json`)
+          releaseDraft: ${{ needs.version.outputs.draft == 'true' }}
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          args: ${{ matrix.args }}
+          includeUpdaterJson: false
+
+  notify:
+    needs: [version, build]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summary
+        run: |
+          echo "Tag: ${{ needs.version.outputs.tag }}"
+          echo "Version: ${{ needs.version.outputs.version }}"
+          echo "Build result: ${{ needs.build.result }}"
+          echo "Open the draft release in GitHub → Releases to publish."
