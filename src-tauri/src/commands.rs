@@ -1,12 +1,14 @@
 use crate::billing;
 use crate::error::AppResult;
-use crate::login;
+use crate::login::{self, LoginStatusEvent};
 use crate::paths;
 use crate::settings::{self, Settings};
 use crate::store;
 use crate::types::{AccountSummary, QuotaInfo};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 
 #[tauri::command]
 pub fn list_accounts() -> AppResult<Vec<AccountSummary>> {
@@ -35,12 +37,16 @@ fn summary_from_import(user_id: String, meta: crate::types::AccountMeta) -> Acco
     }
 }
 
-/// Runs browser login on a worker thread so the UI stays responsive.
+/// Runs device-auth login; streams URL/code via event `login-status`.
 #[tauri::command]
-pub async fn add_account() -> AppResult<AccountSummary> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn add_account(app: AppHandle, label: Option<String>) -> AppResult<AccountSummary> {
+    let app2 = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
         let s = settings::load_settings()?;
-        let (user_id, meta) = login::run_add_account(&s)?;
+        let on_status: Arc<dyn Fn(LoginStatusEvent) + Send + Sync> = Arc::new(move |ev| {
+            let _ = app2.emit("login-status", &ev);
+        });
+        let (user_id, meta) = login::run_add_account_arc(&s, label, on_status)?;
         Ok(summary_from_import(user_id, meta))
     })
     .await
@@ -48,10 +54,10 @@ pub async fn add_account() -> AppResult<AccountSummary> {
 }
 
 #[tauri::command]
-pub async fn import_current_account() -> AppResult<AccountSummary> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn import_current_account(label: Option<String>) -> AppResult<AccountSummary> {
+    tauri::async_runtime::spawn_blocking(move || {
         let s = settings::load_settings()?;
-        let (user_id, meta) = login::import_current(&s)?;
+        let (user_id, meta) = login::import_current(&s, label)?;
         Ok(summary_from_import(user_id, meta))
     })
     .await
@@ -104,6 +110,16 @@ pub fn remove_account(user_id: String) -> AppResult<()> {
     store::save_meta(&meta)?;
     store::remove_account_snapshot(&user_id)?;
     Ok(())
+}
+
+#[tauri::command]
+pub fn set_account_label(user_id: String, label: Option<String>) -> AppResult<AccountSummary> {
+    login::set_label(&user_id, label)?;
+    let s = settings::load_settings()?;
+    let list = store::list_summaries(&s)?;
+    list.into_iter()
+        .find(|a| a.user_id == user_id)
+        .ok_or_else(|| crate::error::AppError::msg("Account not found after rename"))
 }
 
 #[tauri::command]

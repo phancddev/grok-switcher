@@ -22,21 +22,32 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args);
 }
 
+export type LoginStatusEvent = {
+  kind: "url" | "code" | "message" | "done" | string;
+  value: string;
+};
+
 export const listAccounts = () => invoke<AccountSummary[]>("list_accounts");
 
 export const getActive = () => invoke<AccountSummary | null>("get_active");
 
-export const addAccount = () => invoke<AccountSummary>("add_account");
+export const addAccount = (label?: string | null) =>
+  invoke<AccountSummary>("add_account", { label: label ?? null });
 
-export const importCurrentAccount = () =>
-  invoke<AccountSummary>("import_current_account");
+export const importCurrentAccount = (label?: string | null) =>
+  invoke<AccountSummary>("import_current_account", { label: label ?? null });
 
-/** Tauri 2 default rename_all for command args is camelCase */
 export const switchAccount = (userId: string) =>
   invoke<AccountSummary>("switch_account", { userId });
 
 export const removeAccount = (userId: string) =>
   invoke<void>("remove_account", { userId });
+
+export const setAccountLabel = (userId: string, label?: string | null) =>
+  invoke<AccountSummary>("set_account_label", {
+    userId,
+    label: label ?? null,
+  });
 
 export const refreshQuota = (userId?: string) =>
   invoke<QuotaInfo>("refresh_quota", { userId: userId ?? null });
