@@ -129,9 +129,12 @@ export default function App() {
   return (
     <div className="app">
       <header className="header">
-        <div>
-          <h1>Grok Switcher</h1>
-          <p className="subtitle">Manage Grok Build accounts · switch · check quota</p>
+        <div className="brand">
+          <img className="brand-logo" src="/logo.png" alt="Grok Switcher" width={40} height={40} />
+          <div>
+            <h1>Grok Switcher</h1>
+            <p className="subtitle">Manage Grok Build accounts · switch · check quota</p>
+          </div>
         </div>
         <div className="header-actions">
           <button type="button" className="btn ghost" onClick={() => void openSettings()} disabled={!!busy}>

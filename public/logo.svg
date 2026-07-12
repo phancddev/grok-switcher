@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="128" y2="128" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#151A24"/>
+      <stop offset="1" stop-color="#0B0E14"/>
+    </linearGradient>
+    <linearGradient id="arr" x1="30" y1="64" x2="98" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4C8DF6"/>
+      <stop offset="1" stop-color="#6EA8FE"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+  <rect x="3" y="3" width="122" height="122" rx="26" stroke="#3B82F6" stroke-width="3" fill="none" opacity="0.9"/>
+  <!-- left user -->
+  <circle cx="48" cy="48" r="14" fill="#8B95A8"/>
+  <path d="M28 86c0-12 9-20 20-20s20 8 20 20v4H28v-4z" fill="#8B95A8"/>
+  <!-- right user -->
+  <circle cx="84" cy="56" r="12" fill="#5B6B82"/>
+  <path d="M66 90c0-10 8-17 18-17s18 7 18 17v3H66v-3z" fill="#5B6B82"/>
+  <!-- swap arrow -->
+  <path d="M40 72c14 8 34 8 48 0" stroke="url(#arr)" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M82 64l12 8-12 6" fill="#6EA8FE"/>
+  <path d="M88 72c-14-8-34-8-48 0" stroke="url(#arr)" stroke-width="8" stroke-linecap="round" fill="none" opacity="0.55"/>
+  <path d="M46 80L34 72l12-6" fill="#4C8DF6" opacity="0.7"/>
+  <!-- spark -->
+  <circle cx="72" cy="42" r="3" fill="#7FD99A"/>
+  <path d="M72 34v6M72 44v6M66 40h6M72 40h6" stroke="#7FD99A" stroke-width="2" stroke-linecap="round"/>
+</svg>
