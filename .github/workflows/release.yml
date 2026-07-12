@@ -39,14 +39,14 @@ jobs:
             VERSION="${TAG#v}"
             VERSION="${VERSION%%+*}"   # strip build metadata if present
             IS_RELEASE=true
-            DRAFT=true
+            DRAFT=false
             PRERELEASE=false
           elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.tag }}" ]]; then
             TAG="${{ inputs.tag }}"
             VERSION="${TAG#v}"
             VERSION="${VERSION%%+*}"
             IS_RELEASE=true
-            DRAFT=true
+            DRAFT=false
             PRERELEASE=false
           elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
             # Push to main → draft pre-release (hyphen, not +, for clean GitHub tag URLs)
@@ -238,6 +238,6 @@ jobs:
         run: |
           echo "Tag: ${{ needs.version.outputs.tag }}"
           echo "Version: ${{ needs.version.outputs.version }}"
+          echo "Draft: ${{ needs.version.outputs.draft }}"
           echo "Preflight result: ${{ needs.preflight.result }}"
           echo "Build result: ${{ needs.build.result }}"
-          echo "Open the draft release in GitHub → Releases to publish."
