@@ -57,7 +57,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENGNzlGMzNCNEYwMjYwMDEKUldRQllBSlBPL041enpaRHRZeExERVVmV0dqRk15ZmpUaEtoSTJxa1luSjRVTTRoMUswNG1FbFUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGODk5QzY4REVGNUJDN0YKUldSL3ZQWGVhSnlKN3c1eXRoZE5TVHpxeTZiSVkyb29HRHJaMStzajdOaEl4K096Y0VwNVoxTkMK",
       "endpoints": [
         "https://github.com/phancddev/grok-switcher/releases/latest/download/latest.json"
       ]

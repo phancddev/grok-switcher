@@ -28,7 +28,7 @@ jobs:
       draft: ${{ steps.meta.outputs.draft }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: meta
         shell: bash
         run: |
@@ -70,8 +70,42 @@ jobs:
           echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
           echo "Resolved tag=${TAG} version=${VERSION} is_release=${IS_RELEASE} draft=${DRAFT} prerelease=${PRERELEASE}"
 
-  build:
+  preflight:
     needs: version
+    if: needs.version.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Validate updater signing credentials
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "::error::Missing TAURI_SIGNING_PRIVATE_KEY repository secret."
+            exit 1
+          fi
+
+          TEMP_DIR=$(mktemp -d)
+          trap 'rm -rf "$TEMP_DIR"' EXIT
+          cp package.json "$TEMP_DIR/payload.json"
+          npm exec tauri -- signer sign "$TEMP_DIR/payload.json"
+          test -s "$TEMP_DIR/payload.json.sig"
+
+  build:
+    needs: [version, preflight]
     if: needs.version.outputs.is_release == 'true'
     strategy:
       fail-fast: false
@@ -96,10 +130,10 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -126,7 +160,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
             librsvg2-dev \
             patchelf \
             libssl-dev \
@@ -158,7 +191,7 @@ jobs:
           " "$CLEAN"
 
       - name: Build Tauri app & upload release assets
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Required for signed auto-updates (tauri-plugin-updater).
@@ -194,11 +227,10 @@ jobs:
           releaseDraft: ${{ needs.version.outputs.draft == 'true' }}
           prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
           args: ${{ matrix.args }}
-          includeUpdaterJson: true
-          updaterJsonKeepUniversal: true
+          uploadUpdaterJson: true
 
   notify:
-    needs: [version, build]
+    needs: [version, preflight, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -206,5 +238,6 @@ jobs:
         run: |
           echo "Tag: ${{ needs.version.outputs.tag }}"
           echo "Version: ${{ needs.version.outputs.version }}"
+          echo "Preflight result: ${{ needs.preflight.result }}"
           echo "Build result: ${{ needs.build.result }}"
           echo "Open the draft release in GitHub → Releases to publish."

@@ -96,8 +96,10 @@ npx tauri signer generate -w ~/.tauri/grok-switcher.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD (if you set one)
 ```
 
+Back up the private key (and its password, if any) outside the repository. Existing installs can only accept updates signed by the matching key. The release workflow validates the signing credentials before starting the platform build matrix.
+
 Publish a versioned release (tag `v0.x.y`). CI builds installers and attaches `latest.json`. The app endpoint is:
 
 `https://github.com/phancddev/grok-switcher/releases/latest/download/latest.json`
 
-Without the private key secret, builds still work; the app falls back to the “Download” button on new tags.
+Without a valid private key secret, the release workflow stops at the preflight job instead of failing after the platform bundles have already been built.
