@@ -99,16 +99,27 @@ pub fn import_auth_as_account(auth: &AuthFile) -> AppResult<(String, AccountMeta
 
 pub fn list_summaries(settings: &Settings) -> AppResult<Vec<AccountSummary>> {
     let mut meta = load_meta()?;
-    // Live auth.json is source of truth for which account Grok currently uses.
+    // Live auth.json is source of truth only when that user is a managed account.
+    // Unmanaged live sessions must not appear as "active" over stored accounts.
     let active_from_file = detect_active_user_id(settings)?;
     let active = if let Some(ref live) = active_from_file {
-        if meta.accounts.contains_key(live) && meta.active_user_id.as_ref() != Some(live) {
-            meta.active_user_id = Some(live.clone());
-            let _ = save_meta(&meta);
+        if meta.accounts.contains_key(live) {
+            if meta.active_user_id.as_ref() != Some(live) {
+                meta.active_user_id = Some(live.clone());
+                let _ = save_meta(&meta);
+            }
+            Some(live.clone())
+        } else {
+            // A live unmanaged session means no saved account is actually active.
+            if meta.active_user_id.take().is_some() {
+                let _ = save_meta(&meta);
+            }
+            None
         }
-        Some(live.clone())
     } else {
-        meta.active_user_id.clone()
+        meta.active_user_id
+            .clone()
+            .filter(|id| meta.accounts.contains_key(id))
     };
 
     let mut out: Vec<AccountSummary> = meta

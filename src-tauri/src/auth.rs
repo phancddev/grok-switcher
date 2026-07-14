@@ -1,6 +1,9 @@
 use crate::error::{AppError, AppResult};
 use crate::types::{AuthEntry, AuthFile};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD},
+    Engine,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,7 +87,13 @@ pub fn jwt_claim(token: &str, claim: &str) -> Option<String> {
         return None;
     }
     let payload = parts[1];
-    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    // Try common JWT base64 variants (URL-safe unpadded first, then padded / standard).
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .or_else(|_| STANDARD_NO_PAD.decode(payload))
+        .or_else(|_| STANDARD.decode(payload))
+        .ok()?;
     let v: Value = serde_json::from_slice(&decoded).ok()?;
     match v.get(claim)? {
         Value::String(s) => Some(s.clone()),

@@ -36,6 +36,17 @@ pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Release date (YYYY-MM-DD) embedded consistently by release CI.
+/// Local builds fall back to their UTC build date.
+pub fn app_release_date() -> Option<String> {
+    let d = env!("GROK_SWITCHER_RELEASE_DATE");
+    if d.is_empty() || d == "unknown" {
+        None
+    } else {
+        Some(d.to_string())
+    }
+}
+
 /// Strip leading `v` and any build metadata (`+…`) / pre-release for comparison base.
 fn normalize_version(raw: &str) -> String {
     let s = raw.trim().trim_start_matches('v').trim_start_matches('V');
@@ -61,14 +72,8 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 fn parse_semver(s: &str) -> (u64, u64, u64) {
     let mut parts = s.split('.');
-    let major = parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
-    let minor = parts
-        .next()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(0);
+    let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
     let patch = parts
         .next()
         .and_then(|p| {
@@ -83,9 +88,7 @@ fn parse_semver(s: &str) -> (u64, u64, u64) {
 /// Check GitHub Releases API for a newer non-draft release.
 pub fn check_github_latest() -> AppResult<GithubUpdateInfo> {
     let current = app_version();
-    let url = format!(
-        "https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-    );
+    let url = format!("https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest");
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))

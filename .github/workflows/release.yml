@@ -27,6 +27,7 @@ jobs:
       is_release: ${{ steps.meta.outputs.is_release }}
       draft: ${{ steps.meta.outputs.draft }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
+      release_date: ${{ steps.meta.outputs.release_date }}
     steps:
       - uses: actions/checkout@v6
       - id: meta
@@ -63,12 +64,14 @@ jobs:
             DRAFT=true
             PRERELEASE=false
           fi
+          RELEASE_DATE=$(date -u +%F)
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "is_release=${IS_RELEASE}" >> "$GITHUB_OUTPUT"
           echo "draft=${DRAFT}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${PRERELEASE}" >> "$GITHUB_OUTPUT"
-          echo "Resolved tag=${TAG} version=${VERSION} is_release=${IS_RELEASE} draft=${DRAFT} prerelease=${PRERELEASE}"
+          echo "release_date=${RELEASE_DATE}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${TAG} version=${VERSION} release_date=${RELEASE_DATE} is_release=${IS_RELEASE} draft=${DRAFT} prerelease=${PRERELEASE}"
 
   preflight:
     needs: version
@@ -194,6 +197,8 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Resolve once in the version job so every platform embeds the same date.
+          GROK_SWITCHER_RELEASE_DATE: ${{ needs.version.outputs.release_date }}
           # Required for signed auto-updates (tauri-plugin-updater).
           # Generate: npx tauri signer generate -w ~/.tauri/grok-switcher.key
           # Then set secrets TAURI_SIGNING_PRIVATE_KEY (+ optional PASSWORD).

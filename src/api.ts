@@ -75,6 +75,13 @@ export type GithubUpdateInfo = {
 
 export const getAppVersion = () => invoke<string>("get_app_version");
 
+export type AppInfo = {
+  version: string;
+  releaseDate?: string | null;
+};
+
+export const getAppInfo = () => invoke<AppInfo>("get_app_info");
+
 export const checkGithubUpdate = () =>
   invoke<GithubUpdateInfo>("check_github_update");
 

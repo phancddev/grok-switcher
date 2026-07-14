@@ -347,23 +347,47 @@ pub fn import_current(
         .map_err(|_| AppError::msg("Auth lock poisoned"))?;
     let auth_path = auth_json_path(settings)?;
     let auth = read_auth_file(&auth_path)?.ok_or_else(|| {
-        AppError::msg(
-            "No active Grok session in auth.json. Run Add Account or grok login first.",
-        )
+        AppError::msg("No active Grok session in auth.json. Run Add Account or grok login first.")
     })?;
     finalize_import(&auth, label)
 }
 
-pub fn switch_to(settings: &Settings, user_id: &str) -> AppResult<()> {
-    let _guard = AUTH_LOCK
-        .lock()
-        .map_err(|_| AppError::msg("Auth lock poisoned"))?;
+/// Write snapshot to live auth.json and mark active in meta.
+/// Caller must already hold `AUTH_LOCK` (and `REFRESH_LOCK` if coordinating with refresh).
+pub(crate) fn switch_to_inner(settings: &Settings, user_id: &str) -> AppResult<()> {
     use crate::store::{load_account_snapshot, set_active};
     let auth = load_account_snapshot(user_id)?;
     let path = auth_json_path(settings)?;
     write_auth_file_atomic(&path, &auth)?;
     set_active(user_id)?;
     Ok(())
+}
+
+/// Clear live CLI session (delete auth.json). Caller must hold `AUTH_LOCK`.
+pub(crate) fn clear_live_auth(settings: &Settings) -> AppResult<()> {
+    let path = auth_json_path(settings)?;
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+/// Replace the live CLI session. Caller must hold `AUTH_LOCK`.
+pub(crate) fn replace_live_auth(settings: &Settings, auth: Option<&AuthFile>) -> AppResult<()> {
+    match auth {
+        Some(auth) => {
+            let path = auth_json_path(settings)?;
+            write_auth_file_atomic(&path, auth)
+        }
+        None => clear_live_auth(settings),
+    }
+}
+
+pub fn switch_to(settings: &Settings, user_id: &str) -> AppResult<()> {
+    let _guard = AUTH_LOCK
+        .lock()
+        .map_err(|_| AppError::msg("Auth lock poisoned"))?;
+    switch_to_inner(settings, user_id)
 }
 
 pub fn set_label(user_id: &str, label: Option<String>) -> AppResult<()> {

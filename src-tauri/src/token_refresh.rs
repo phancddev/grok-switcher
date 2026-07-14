@@ -2,6 +2,13 @@
 //!
 //! - On app start and periodically: refresh accounts whose access token is expired or
 //!   within EARLY_REFRESH_SECS of expiry.
+//!
+//! ## Lock order (must be consistent everywhere to avoid deadlock)
+//! 1. `REFRESH_LOCK` (outer)
+//! 2. `AUTH_LOCK` (inner)
+//!
+//! Never take AUTH_LOCK then REFRESH_LOCK. Hold AUTH_LOCK only around disk I/O on
+//! auth.json / snapshots — not across network OIDC calls.
 
 use crate::auth::{
     extract_user_id, jwt_claim, primary_entry, read_auth_file, write_auth_file_atomic,
@@ -23,8 +30,11 @@ use std::time::Duration as StdDuration;
 const EARLY_REFRESH_SECS: i64 = 10 * 60; // 10 minutes
 /// How often the background loop scans for soon-to-expire tokens.
 const PERIODIC_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60); // 5 minutes
+/// Access token is still usable for API calls if it has at least this much life left.
+const MIN_USABLE_ACCESS_SECS: i64 = 30;
 
-static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+/// Serialize token refresh per process. Outer lock — take before `AUTH_LOCK`.
+pub(crate) static REFRESH_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -67,26 +77,47 @@ fn token_url(issuer: &str) -> AppResult<String> {
     Ok(format!("{base}/oauth2/token"))
 }
 
+/// Effective access-token expiry: **minimum** of parseable `expires_at` and JWT `exp`.
+/// Preferring only `expires_at` can leave a dead access token marked "still valid".
 fn access_expiry(entry: &AuthEntry) -> Option<DateTime<Utc>> {
-    if let Some(ref s) = entry.expires_at {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
-            return Some(dt.with_timezone(&Utc));
-        }
+    let from_expires_at = entry.expires_at.as_ref().and_then(|s| {
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.with_timezone(&Utc))
+    });
+    let from_jwt = jwt_claim(&entry.key, "exp")
+        .and_then(|s| s.parse::<i64>().ok())
+        .and_then(|exp| DateTime::from_timestamp(exp, 0));
+
+    match (from_expires_at, from_jwt) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
     }
-    if let Some(exp) = jwt_claim(&entry.key, "exp").and_then(|s| s.parse::<i64>().ok()) {
-        return DateTime::from_timestamp(exp, 0);
-    }
-    None
 }
 
 /// True if access is already expired or expires within EARLY_REFRESH_SECS.
+///
+/// Unknown expiry: do **not** auto-refresh every scan (avoids RT churn / death spiral).
+/// Callers with `force=true` still call OIDC; `ensure_fresh_token` soft-fails if access works.
 pub fn needs_refresh(entry: &AuthEntry) -> bool {
     let Some(exp) = access_expiry(entry) else {
-        // Unknown expiry → treat as needs refresh when we have refresh_token
-        return entry.refresh_token.as_ref().is_some_and(|t| !t.is_empty());
+        return false;
     };
     let deadline = Utc::now() + Duration::seconds(EARLY_REFRESH_SECS);
     exp <= deadline
+}
+
+fn should_refresh_entry(entry: &AuthEntry, force: bool, refresh_unknown_expiry: bool) -> bool {
+    force || needs_refresh(entry) || (refresh_unknown_expiry && access_expiry(entry).is_none())
+}
+
+fn access_token_still_usable(entry: &AuthEntry) -> bool {
+    match access_expiry(entry) {
+        Some(exp) => exp > Utc::now() + Duration::seconds(MIN_USABLE_ACCESS_SECS),
+        None => false,
+    }
 }
 
 fn apply_token_response(entry: &mut AuthEntry, access_token: &str, resp: &TokenResponse) {
@@ -96,9 +127,105 @@ fn apply_token_response(entry: &mut AuthEntry, access_token: &str, resp: &TokenR
             entry.refresh_token = Some(rt.clone());
         }
     }
-    let expires_in = resp.expires_in.unwrap_or(6 * 3600);
+    // Prefer JWT `exp` when present; else expires_in with 1h default (not 6h).
+    if let Some(exp) = jwt_claim(access_token, "exp").and_then(|s| s.parse::<i64>().ok()) {
+        if let Some(dt) = DateTime::from_timestamp(exp, 0) {
+            entry.expires_at = Some(dt.to_rfc3339());
+            return;
+        }
+    }
+    let expires_in = resp.expires_in.unwrap_or(3600);
     let exp = Utc::now() + Duration::seconds(expires_in as i64);
     entry.expires_at = Some(exp.to_rfc3339());
+}
+
+/// If live `auth.json` is this user and credentials differ, copy live → snapshot first.
+/// Returns true when the snapshot was updated from live.
+///
+/// Caller should hold `AUTH_LOCK` (and typically `REFRESH_LOCK`).
+fn sync_live_into_snapshot_if_active(
+    user_id: &str,
+    auth: &mut AuthFile,
+    settings: &Settings,
+) -> AppResult<bool> {
+    let active_path = auth_json_path(settings)?;
+    let Some(live_auth) = read_auth_file(&active_path)? else {
+        return Ok(false);
+    };
+    let Ok((_, live_entry)) = primary_entry(&live_auth) else {
+        return Ok(false);
+    };
+    let Ok(live_uid) = extract_user_id(live_entry) else {
+        return Ok(false);
+    };
+    if live_uid != user_id {
+        return Ok(false);
+    }
+
+    let Ok((_, snap_entry)) = primary_entry(auth) else {
+        return Ok(false);
+    };
+
+    let live_rt = live_entry.refresh_token.as_deref().unwrap_or("");
+    let snap_rt = snap_entry.refresh_token.as_deref().unwrap_or("");
+    if live_entry.key == snap_entry.key && live_rt == snap_rt {
+        return Ok(false);
+    }
+
+    // Live credentials differ (CLI may have rotated RT) — adopt live into snapshot.
+    *auth = live_auth;
+    save_account_snapshot(user_id, auth)?;
+    eprintln!("[token_refresh] synced live auth → snapshot for {user_id}");
+    Ok(true)
+}
+
+/// After OIDC failure: if live auth is this user and RT/AT changed vs snapshot, heal snapshot.
+fn try_heal_from_live(user_id: &str, settings: &Settings) -> AppResult<Option<RefreshOneResult>> {
+    let active_path = auth_json_path(settings)?;
+    let Some(live_auth) = read_auth_file(&active_path)? else {
+        return Ok(None);
+    };
+    let Ok((_, live_entry)) = primary_entry(&live_auth) else {
+        return Ok(None);
+    };
+    let Ok(live_uid) = extract_user_id(live_entry) else {
+        return Ok(None);
+    };
+    if live_uid != user_id {
+        return Ok(None);
+    }
+
+    let snap = match load_account_snapshot(user_id) {
+        Ok(s) => s,
+        Err(_) => {
+            // Snapshot missing (removed?) — nothing to heal into.
+            return Ok(None);
+        }
+    };
+    let Ok((_, snap_entry)) = primary_entry(&snap) else {
+        return Ok(None);
+    };
+
+    let live_rt = live_entry.refresh_token.as_deref().unwrap_or("");
+    let snap_rt = snap_entry.refresh_token.as_deref().unwrap_or("");
+    if live_entry.key == snap_entry.key && live_rt == snap_rt {
+        return Ok(None);
+    }
+
+    // Account may have been removed while OIDC was in flight.
+    let meta = load_meta()?;
+    if !meta.accounts.contains_key(user_id) {
+        return Ok(None);
+    }
+
+    save_account_snapshot(user_id, &live_auth)?;
+    eprintln!("[token_refresh] healed snapshot from live auth after OIDC failure for {user_id}");
+    Ok(Some(RefreshOneResult {
+        user_id: user_id.into(),
+        ok: true,
+        message: "Refresh skipped: healed from live auth".into(),
+        expires_at: live_entry.expires_at.clone(),
+    }))
 }
 
 /// Exchange refresh_token for a new access token (OIDC public client).
@@ -165,6 +292,14 @@ pub fn refresh_entry(entry: &mut AuthEntry) -> AppResult<()> {
 }
 
 fn persist_auth_file(user_id: &str, auth: &AuthFile, settings: &Settings) -> AppResult<()> {
+    // Abort if account was removed while refresh was in flight (prevents resurrection).
+    let meta = load_meta()?;
+    if !meta.accounts.contains_key(user_id) {
+        return Err(AppError::msg(format!(
+            "Account {user_id} was removed; aborting token persist"
+        )));
+    }
+
     save_account_snapshot(user_id, auth)?;
 
     // If this account is currently active in ~/.grok/auth.json, keep CLI in sync
@@ -183,13 +318,27 @@ fn persist_auth_file(user_id: &str, auth: &AuthFile, settings: &Settings) -> App
 
 /// Refresh one account's tokens.
 /// - `force`: always call OIDC refresh (explicit manual refresh)
-/// - `!force`: only if `needs_refresh`
-pub fn refresh_account(user_id: &str, force: bool) -> AppResult<RefreshOneResult> {
+/// - `!force`: only if `needs_refresh` after optional live→snapshot sync
+fn refresh_account_with_policy(
+    user_id: &str,
+    force: bool,
+    refresh_unknown_expiry: bool,
+) -> AppResult<RefreshOneResult> {
     let _guard = REFRESH_LOCK
         .lock()
         .map_err(|_| AppError::msg("Token refresh lock poisoned"))?;
 
+    let settings = settings::load_settings()?;
     let mut auth = load_account_snapshot(user_id)?;
+
+    // Prefer live CLI tokens for the active account before deciding needs_refresh / OIDC.
+    let live_synced = {
+        let _auth_guard = AUTH_LOCK
+            .lock()
+            .map_err(|_| AppError::msg("Auth lock poisoned"))?;
+        sync_live_into_snapshot_if_active(user_id, &mut auth, &settings)?
+    };
+
     let key = auth
         .keys()
         .next()
@@ -210,11 +359,19 @@ pub fn refresh_account(user_id: &str, force: bool) -> AppResult<RefreshOneResult
         });
     }
 
-    if !force && !needs_refresh(entry) {
+    // Background scans skip unknown expiry to avoid churn. API paths opt in to one refresh
+    // attempt, which gives opaque/legacy tokens a parseable expiry for subsequent calls.
+    let refreshing_unknown_expiry =
+        !force && !needs_refresh(entry) && access_expiry(entry).is_none();
+    if !should_refresh_entry(entry, force, refresh_unknown_expiry) {
         return Ok(RefreshOneResult {
             user_id: user_id.into(),
             ok: true,
-            message: "Access token still valid".into(),
+            message: if live_synced {
+                "Synced from live auth (access token still valid)".into()
+            } else {
+                "Access token still valid".into()
+            },
             expires_at: entry.expires_at.clone(),
         });
     }
@@ -223,15 +380,32 @@ pub fn refresh_account(user_id: &str, force: bool) -> AppResult<RefreshOneResult
         Ok(()) => {
             let exp = entry.expires_at.clone();
             let refreshed_entry = entry.clone();
-            let settings = settings::load_settings()?;
 
             // Synchronize the live auth-file read/check/write with login and switch operations.
             let _auth_guard = AUTH_LOCK
                 .lock()
                 .map_err(|_| AppError::msg("Auth lock poisoned"))?;
+
+            // Account removed during OIDC network call — do not resurrect snapshot.
+            let meta = load_meta()?;
+            if !meta.accounts.contains_key(user_id) {
+                return Ok(RefreshOneResult {
+                    user_id: user_id.into(),
+                    ok: true,
+                    message: "Refresh skipped: account was removed".into(),
+                    expires_at: None,
+                });
+            }
+
             let mut latest_auth = load_account_snapshot(user_id)?;
+            // Key may have changed if another path rewrote the snapshot.
+            let latest_key = latest_auth
+                .keys()
+                .next()
+                .cloned()
+                .ok_or_else(|| AppError::msg("Empty auth snapshot after refresh"))?;
             let latest_entry = latest_auth
-                .get_mut(&key)
+                .get_mut(&latest_key)
                 .ok_or_else(|| AppError::msg("Missing auth entry after refresh"))?;
 
             // Do not overwrite a re-login or another credential update completed in-flight.
@@ -249,25 +423,63 @@ pub fn refresh_account(user_id: &str, force: bool) -> AppResult<RefreshOneResult
             latest_entry.key = refreshed_entry.key;
             latest_entry.refresh_token = refreshed_entry.refresh_token;
             latest_entry.expires_at = refreshed_entry.expires_at;
-            persist_auth_file(user_id, &latest_auth, &settings)?;
+
+            match persist_auth_file(user_id, &latest_auth, &settings) {
+                Ok(()) => Ok(RefreshOneResult {
+                    user_id: user_id.into(),
+                    ok: true,
+                    message: if force {
+                        "Refreshed".into()
+                    } else if refreshing_unknown_expiry {
+                        "Refreshed (expiry was unknown)".into()
+                    } else {
+                        "Refreshed (near expiry)".into()
+                    },
+                    expires_at: exp,
+                }),
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("was removed") {
+                        Ok(RefreshOneResult {
+                            user_id: user_id.into(),
+                            ok: true,
+                            message: "Refresh skipped: account was removed".into(),
+                            expires_at: None,
+                        })
+                    } else {
+                        Ok(RefreshOneResult {
+                            user_id: user_id.into(),
+                            ok: false,
+                            message: msg,
+                            expires_at: exp,
+                        })
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            // OIDC invalid_grant / failure: try healing from live CLI tokens once.
+            let heal = {
+                let _auth_guard = AUTH_LOCK
+                    .lock()
+                    .map_err(|_| AppError::msg("Auth lock poisoned"))?;
+                try_heal_from_live(user_id, &settings)?
+            };
+            if let Some(healed) = heal {
+                return Ok(healed);
+            }
             Ok(RefreshOneResult {
                 user_id: user_id.into(),
-                ok: true,
-                message: if force {
-                    "Refreshed".into()
-                } else {
-                    "Refreshed (near expiry)".into()
-                },
-                expires_at: exp,
+                ok: false,
+                message: e.to_string(),
+                expires_at: entry.expires_at.clone(),
             })
         }
-        Err(e) => Ok(RefreshOneResult {
-            user_id: user_id.into(),
-            ok: false,
-            message: e.to_string(),
-            expires_at: entry.expires_at.clone(),
-        }),
     }
+}
+
+pub fn refresh_account(user_id: &str, force: bool) -> AppResult<RefreshOneResult> {
+    refresh_account_with_policy(user_id, force, false)
 }
 
 /// Refresh every stored account.
@@ -299,7 +511,11 @@ pub fn refresh_accounts(force_all: bool) -> RefreshAllReport {
     for user_id in ids {
         match refresh_account(&user_id, force_all) {
             Ok(r) => {
-                if r.ok && (r.message.contains("still valid") || r.message.contains("skipped")) {
+                if r.ok
+                    && (r.message.contains("still valid")
+                        || r.message.contains("skipped")
+                        || r.message.contains("Synced from live"))
+                {
                     skipped += 1;
                 } else if r.ok {
                     refreshed += 1;
@@ -329,19 +545,47 @@ pub fn refresh_accounts(force_all: bool) -> RefreshAllReport {
 }
 
 /// Ensure access token is fresh before API calls (lazy refresh).
+/// If OIDC refresh fails but the access JWT is still usable, proceed (soft success).
 pub fn ensure_fresh_token(user_id: &str) -> AppResult<()> {
-    let r = refresh_account(user_id, false)?;
+    // Unlike the periodic scan, an API path should make one OIDC attempt when expiry is
+    // unknown. A successful response records expires_at, so this does not churn every call.
+    let r = refresh_account_with_policy(user_id, false, true)?;
     if r.ok {
         return Ok(());
     }
-    // If still valid message path already ok; failed near-expiry is an error for callers
-    if r.message.contains("still valid") {
+
+    // Structured: if access token still has life, do not hard-fail the API path.
+    if let Ok(auth) = load_account_snapshot(user_id) {
+        if let Ok((_, entry)) = primary_entry(&auth) {
+            if access_token_still_usable(entry) {
+                eprintln!(
+                    "[token_refresh] ensure_fresh: refresh failed but access still usable for {user_id}: {}",
+                    r.message
+                );
+                return Ok(());
+            }
+            // Expiry is unknown: refresh was attempted above. Let the API validate the
+            // existing access token if OIDC was temporarily unavailable, and retry refresh
+            // again on the next API call if necessary.
+            if access_expiry(entry).is_none() {
+                eprintln!(
+                    "[token_refresh] ensure_fresh: refresh failed for unknown-expiry token; trying existing access for {user_id}: {}",
+                    r.message
+                );
+                return Ok(());
+            }
+            // No refresh_token: allow try with existing access (may 401 later).
+            if entry.refresh_token.as_ref().is_none_or(|t| t.is_empty()) {
+                return Ok(());
+            }
+        }
+    }
+
+    // Fallback string matching (legacy paths).
+    if r.message.contains("still valid") || r.message.contains("No refresh_token") {
         return Ok(());
     }
-    // No refresh_token: still allow try with existing access (may 401)
-    if r.message.contains("No refresh_token") {
-        return Ok(());
-    }
+
     Err(AppError::msg(format!(
         "Token refresh failed for {user_id}: {}",
         r.message
@@ -382,7 +626,34 @@ use tauri::Emitter;
 
 #[cfg(test)]
 mod tests {
-    use super::token_url;
+    use super::*;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    fn make_jwt(exp: i64) -> String {
+        let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"none","typ":"JWT"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#));
+        format!("{header}.{payload}.sig")
+    }
+
+    fn bare_entry(key: &str, expires_at: Option<&str>) -> AuthEntry {
+        AuthEntry {
+            key: key.to_string(),
+            auth_mode: None,
+            create_time: None,
+            user_id: None,
+            email: None,
+            first_name: None,
+            last_name: None,
+            principal_type: None,
+            principal_id: None,
+            team_id: None,
+            refresh_token: Some("rt".into()),
+            expires_at: expires_at.map(String::from),
+            oidc_issuer: None,
+            oidc_client_id: None,
+            coding_data_retention_opt_out: None,
+        }
+    }
 
     #[test]
     fn accepts_xai_oidc_issuer() {
@@ -396,5 +667,113 @@ mod tests {
     fn rejects_untrusted_oidc_issuer() {
         assert!(token_url("http://auth.x.ai").is_err());
         assert!(token_url("https://example.com").is_err());
+    }
+
+    #[test]
+    fn access_expiry_uses_min_of_expires_at_and_jwt() {
+        // JWT exp earlier than expires_at → min is JWT
+        let jwt_exp = 1_700_000_000i64; // 2023-11-14
+        let later = "2030-01-01T00:00:00+00:00";
+        let entry = bare_entry(&make_jwt(jwt_exp), Some(later));
+        let exp = access_expiry(&entry).expect("expiry");
+        assert_eq!(exp.timestamp(), jwt_exp);
+
+        // expires_at earlier than JWT → min is expires_at
+        let early = "2020-01-01T00:00:00+00:00";
+        let far_jwt = 2_000_000_000i64;
+        let entry2 = bare_entry(&make_jwt(far_jwt), Some(early));
+        let exp2 = access_expiry(&entry2).expect("expiry");
+        assert_eq!(
+            exp2.timestamp(),
+            DateTime::parse_from_rfc3339(early).unwrap().timestamp()
+        );
+    }
+
+    #[test]
+    fn access_expiry_jwt_only_and_expires_at_only() {
+        let jwt_exp = 1_800_000_000i64;
+        let entry = bare_entry(&make_jwt(jwt_exp), None);
+        assert_eq!(access_expiry(&entry).unwrap().timestamp(), jwt_exp);
+
+        let only_at = "2025-06-01T12:00:00+00:00";
+        let entry2 = bare_entry("not-a-jwt", Some(only_at));
+        let exp2 = access_expiry(&entry2).unwrap();
+        assert_eq!(
+            exp2.timestamp(),
+            DateTime::parse_from_rfc3339(only_at).unwrap().timestamp()
+        );
+    }
+
+    #[test]
+    fn needs_refresh_unknown_expiry_is_false() {
+        let entry = bare_entry("not-a-jwt", None);
+        assert!(!needs_refresh(&entry));
+        assert!(!should_refresh_entry(&entry, false, false));
+        assert!(should_refresh_entry(&entry, false, true));
+    }
+
+    #[test]
+    fn needs_refresh_expired_is_true() {
+        let past = Utc::now().timestamp() - 3600;
+        let entry = bare_entry(&make_jwt(past), None);
+        assert!(needs_refresh(&entry));
+    }
+
+    #[test]
+    fn needs_refresh_far_future_is_false() {
+        let future = Utc::now().timestamp() + 24 * 3600;
+        let entry = bare_entry(&make_jwt(future), None);
+        assert!(!needs_refresh(&entry));
+    }
+
+    #[test]
+    fn apply_token_response_prefers_jwt_exp() {
+        let exp = Utc::now().timestamp() + 1800;
+        let mut entry = bare_entry("old", Some("2099-01-01T00:00:00+00:00"));
+        let jwt = make_jwt(exp);
+        let resp = TokenResponse {
+            access_token: Some(jwt.clone()),
+            refresh_token: Some("new-rt".into()),
+            expires_in: Some(99999),
+            error: None,
+            error_description: None,
+        };
+        apply_token_response(&mut entry, &jwt, &resp);
+        assert_eq!(entry.key, jwt);
+        assert_eq!(entry.refresh_token.as_deref(), Some("new-rt"));
+        let got = DateTime::parse_from_rfc3339(entry.expires_at.as_ref().unwrap())
+            .unwrap()
+            .timestamp();
+        assert_eq!(got, exp);
+    }
+
+    #[test]
+    fn apply_token_response_default_expires_in_is_3600() {
+        let mut entry = bare_entry("old", None);
+        let resp = TokenResponse {
+            access_token: Some("opaque-token".into()),
+            refresh_token: None,
+            expires_in: None,
+            error: None,
+            error_description: None,
+        };
+        let before = Utc::now();
+        apply_token_response(&mut entry, "opaque-token", &resp);
+        let got = DateTime::parse_from_rfc3339(entry.expires_at.as_ref().unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        let delta = (got - before).num_seconds();
+        assert!((3590..=3610).contains(&delta), "delta={delta}");
+    }
+
+    #[test]
+    fn access_token_still_usable_respects_min_life() {
+        let soon = Utc::now().timestamp() + 10; // < 30s
+        let entry = bare_entry(&make_jwt(soon), None);
+        assert!(!access_token_still_usable(&entry));
+
+        let later = Utc::now().timestamp() + 120;
+        let entry2 = bare_entry(&make_jwt(later), None);
+        assert!(access_token_still_usable(&entry2));
     }
 }

@@ -106,13 +106,105 @@ pub fn switch_account(user_id: String) -> AppResult<AccountSummary> {
 
 #[tauri::command]
 pub fn remove_account(user_id: String) -> AppResult<()> {
-    let mut meta = store::load_meta()?;
+    // Lock order: REFRESH_LOCK outer, AUTH_LOCK inner (same as token_refresh) to avoid deadlock.
+    let _refresh_guard = token_refresh::REFRESH_LOCK
+        .lock()
+        .map_err(|_| crate::error::AppError::msg("Token refresh lock poisoned"))?;
+    let _auth_guard = login::AUTH_LOCK
+        .lock()
+        .map_err(|_| crate::error::AppError::msg("Auth lock poisoned"))?;
+
+    let s = settings::load_settings()?;
+    let original_meta = store::load_meta()?;
+    let mut meta = original_meta.clone();
+    if !meta.accounts.contains_key(&user_id) {
+        return Err(crate::error::AppError::msg(format!(
+            "Unknown account: {user_id}"
+        )));
+    }
+
+    // Capture the exact live file so a failed multi-file mutation can restore it.
+    let live_path = paths::auth_json_path(&s)?;
+    let original_live_auth = crate::auth::read_auth_file(&live_path)?;
+    let live_user_id = match original_live_auth.as_ref() {
+        Some(auth) => {
+            let (_, entry) = crate::auth::primary_entry(auth)?;
+            Some(crate::auth::extract_user_id(entry)?)
+        }
+        None => None,
+    };
+    let live_is_this = live_user_id.as_deref() == Some(user_id.as_str());
+
     meta.accounts.remove(&user_id);
-    if meta.active_user_id.as_deref() == Some(user_id.as_str()) {
+
+    // Prefer most recently used remaining account when live session must switch.
+    let next_user_id = if live_is_this && !meta.accounts.is_empty() {
+        let mut ids: Vec<(String, Option<String>)> = meta
+            .accounts
+            .iter()
+            .map(|(id, m)| (id.clone(), m.last_used.clone()))
+            .collect();
+        // RFC3339 strings sort chronologically; None last_used sorts first (older).
+        ids.sort_by(|a, b| b.1.cmp(&a.1));
+        ids.into_iter().next().map(|(id, _)| id)
+    } else {
+        None
+    };
+
+    // Validate the next snapshot before mutating live auth or metadata.
+    let next_auth = next_user_id
+        .as_deref()
+        .map(store::load_account_snapshot)
+        .transpose()?;
+
+    if live_is_this {
+        login::replace_live_auth(&s, next_auth.as_ref())?;
+        meta.active_user_id = next_user_id.clone();
+        if let Some(next) = next_user_id.as_deref() {
+            if let Some(account) = meta.accounts.get_mut(next) {
+                account.last_used = Some(chrono::Utc::now().to_rfc3339());
+            }
+        }
+    } else if let Some(ref live) = live_user_id {
+        // Keep meta aligned with the real CLI session, but never mark unmanaged live auth active.
+        meta.active_user_id = meta.accounts.contains_key(live).then(|| live.clone());
+    } else if meta.active_user_id.as_deref() == Some(user_id.as_str()) {
         meta.active_user_id = None;
     }
-    store::save_meta(&meta)?;
-    store::remove_account_snapshot(&user_id)?;
+
+    if let Err(save_error) = store::save_meta(&meta) {
+        if live_is_this {
+            if let Err(rollback_error) = login::replace_live_auth(&s, original_live_auth.as_ref()) {
+                return Err(crate::error::AppError::msg(format!(
+                    "Failed to save account removal: {save_error}; live-auth rollback also failed: {rollback_error}"
+                )));
+            }
+        }
+        return Err(save_error);
+    }
+
+    if let Err(remove_error) = store::remove_account_snapshot(&user_id) {
+        let meta_rollback = store::save_meta(&original_meta).err();
+        let live_rollback = if live_is_this {
+            login::replace_live_auth(&s, original_live_auth.as_ref()).err()
+        } else {
+            None
+        };
+
+        if meta_rollback.is_some() || live_rollback.is_some() {
+            return Err(crate::error::AppError::msg(format!(
+                "Failed to remove account snapshot: {remove_error}; rollback failed (meta: {}, live auth: {})",
+                meta_rollback
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "ok".into()),
+                live_rollback
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "ok".into())
+            )));
+        }
+        return Err(remove_error);
+    }
+
     Ok(())
 }
 
@@ -130,11 +222,32 @@ pub fn set_account_label(user_id: String, label: Option<String>) -> AppResult<Ac
 pub async fn refresh_quota(user_id: Option<String>) -> AppResult<QuotaInfo> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = settings::load_settings()?;
+        let meta = store::load_meta()?;
         let uid = match user_id {
-            Some(id) => id,
-            None => store::detect_active_user_id(&s)?
-                .or_else(|| store::load_meta().ok().and_then(|m| m.active_user_id))
-                .ok_or_else(|| crate::error::AppError::msg("No active account"))?,
+            Some(id) => {
+                if !meta.accounts.contains_key(&id) {
+                    return Err(crate::error::AppError::msg(format!(
+                        "Unknown account: {id}"
+                    )));
+                }
+                id
+            }
+            None => {
+                // A present unmanaged live session must not fall back to a saved account.
+                match store::detect_active_user_id(&s)? {
+                    Some(live) if meta.accounts.contains_key(&live) => live,
+                    Some(_) => {
+                        return Err(crate::error::AppError::msg(
+                            "The active Grok CLI session is not managed by Grok Switcher",
+                        ));
+                    }
+                    None => meta
+                        .active_user_id
+                        .clone()
+                        .filter(|id| meta.accounts.contains_key(id))
+                        .ok_or_else(|| crate::error::AppError::msg("No active account"))?,
+                }
+            }
         };
         billing::refresh_quota(&uid)
     })
@@ -171,6 +284,21 @@ pub fn resolve_grok_binary() -> AppResult<Option<String>> {
 #[tauri::command]
 pub fn get_app_version() -> String {
     update::app_version()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    pub version: String,
+    pub release_date: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_app_info() -> AppInfo {
+    AppInfo {
+        version: update::app_version(),
+        release_date: update::app_release_date(),
+    }
 }
 
 /// Always-available GitHub Releases check (no signing required).

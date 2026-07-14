@@ -11,13 +11,14 @@ type Status =
       kind: "available";
       version: string;
       notes?: string | null;
+      publishedAt?: string | null;
       /** tauri plugin update object when in-app install is possible */
       update?: Update;
       releaseUrl?: string;
       mode: "install" | "download";
     }
   | { kind: "downloading"; downloaded: number; total: number | null }
-  | { kind: "ready" }
+  | { kind: "ready"; version?: string; notes?: string | null }
   | { kind: "error"; message: string };
 
 function formatBytes(bytes: number) {
@@ -25,6 +26,27 @@ function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/** Short date for GitHub `published_at` / ISO → e.g. "Jul 14, 2026" */
+function formatShortDate(raw?: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw.trim());
+    const d = m
+      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      : new Date(raw);
+    if (Number.isNaN(d.getTime())) return null;
+    return d.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return null;
+  }
+}
+
+const PENDING_NOTES_KEY = "gs-pending-update-notes";
 
 export function UpdateChecker() {
   const [status, setStatus] = useState<Status>({ kind: "idle" });
@@ -52,6 +74,7 @@ export function UpdateChecker() {
           kind: "available",
           version: update.version,
           notes: update.body,
+          publishedAt: update.date,
           update,
           mode: "install",
         });
@@ -69,6 +92,7 @@ export function UpdateChecker() {
           kind: "available",
           version: info.latestVersion,
           notes: info.releaseNotes,
+          publishedAt: info.publishedAt,
           releaseUrl: info.releaseUrl,
           mode: "download",
         });
@@ -88,7 +112,7 @@ export function UpdateChecker() {
 
   const handleInstall = async () => {
     if (status.kind !== "available" || status.mode !== "install" || !status.update) return;
-    const { update } = status;
+    const { update, version, notes } = status;
     try {
       let downloaded = 0;
       let total: number | null = null;
@@ -103,11 +127,22 @@ export function UpdateChecker() {
             setStatus({ kind: "downloading", downloaded, total });
             break;
           case "Finished":
-            setStatus({ kind: "ready" });
+            setStatus({ kind: "ready", version, notes });
             break;
         }
       });
-      setStatus({ kind: "ready" });
+      // Stash notes so post-relaunch UI can reference them if needed.
+      try {
+        if (notes) {
+          localStorage.setItem(
+            PENDING_NOTES_KEY,
+            JSON.stringify({ version, notes, at: Date.now() }),
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+      setStatus({ kind: "ready", version, notes });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setStatus({ kind: "error", message });
@@ -128,6 +163,20 @@ export function UpdateChecker() {
 
   const handleRelaunch = async () => {
     try {
+      if (status.kind === "ready" && status.notes) {
+        try {
+          localStorage.setItem(
+            PENDING_NOTES_KEY,
+            JSON.stringify({
+              version: status.version,
+              notes: status.notes,
+              at: Date.now(),
+            }),
+          );
+        } catch {
+          /* ignore */
+        }
+      }
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (err) {
@@ -138,6 +187,9 @@ export function UpdateChecker() {
   if (!isTauri() || dismissed || status.kind === "idle" || status.kind === "checking") {
     return null;
   }
+
+  const publishedLabel =
+    status.kind === "available" ? formatShortDate(status.publishedAt) : null;
 
   return (
     <div className="update-banner">
@@ -151,6 +203,9 @@ export function UpdateChecker() {
                   <span className="muted"> (you have v{currentVersion})</span>
                 ) : null}
               </p>
+              {publishedLabel && (
+                <p className="update-meta muted">Released {publishedLabel}</p>
+              )}
               {status.notes && <p className="update-notes">{status.notes}</p>}
             </div>
             <div className="update-actions">

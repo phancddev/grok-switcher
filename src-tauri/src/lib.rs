@@ -39,6 +39,7 @@ pub fn run() {
             commands::save_settings,
             commands::resolve_grok_binary,
             commands::get_app_version,
+            commands::get_app_info,
             commands::check_github_update,
             commands::refresh_all_tokens,
         ])

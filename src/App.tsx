@@ -28,6 +28,40 @@ function formatWhen(iso?: string | null): string {
   }
 }
 
+/** Short date for release strings (YYYY-MM-DD or ISO) → e.g. "Jul 14, 2026" */
+function formatReleaseDate(raw?: string | null): string | null {
+  if (!raw) return null;
+  try {
+    // Prefer date-only parse so UTC midnight does not shift the day in local TZ.
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(raw.trim());
+    const d = m
+      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      : new Date(raw);
+    if (Number.isNaN(d.getTime())) return raw;
+    return d.toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return raw;
+  }
+}
+
+const LAST_SEEN_VERSION_KEY = "gs-last-seen-version";
+const PENDING_UPDATE_NOTES_KEY = "gs-pending-update-notes";
+
+function summarizeUpdateNotes(notes?: string): string | null {
+  if (!notes) return null;
+  const firstMeaningfulLine = notes
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line.length > 0 && !line.startsWith("#"));
+  if (!firstMeaningfulLine) return null;
+  const cleaned = firstMeaningfulLine.replace(/^[-*]\s+/, "");
+  return cleaned.length > 140 ? `${cleaned.slice(0, 137)}…` : cleaned;
+}
+
 /** Relative reset like codex-switcher: "2h 15m", "now" */
 function formatResetRelative(iso?: string | null): string {
   if (!iso) return "";
@@ -266,6 +300,7 @@ export default function App() {
     const saved = localStorage.getItem("gs-theme") as ThemeMode | null;
     return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
   });
+  const [appInfo, setAppInfo] = useState<api.AppInfo | null>(null);
 
   // Add-account modal
   const [showAdd, setShowAdd] = useState(false);
@@ -295,6 +330,50 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Load version / release date; one-shot "Updated to…" toast when version changes.
+  useEffect(() => {
+    let cancelled = false;
+    // Capture this before the theme effect creates the key during a first launch.
+    const hadExistingInstallState = localStorage.getItem("gs-theme") !== null;
+    void (async () => {
+      try {
+        const info = await api.getAppInfo();
+        if (cancelled) return;
+        setAppInfo(info);
+        const lastSeen = localStorage.getItem(LAST_SEEN_VERSION_KEY);
+        const pendingRaw = localStorage.getItem(PENDING_UPDATE_NOTES_KEY);
+        let pending: { version?: string; notes?: string } | null = null;
+        if (pendingRaw) {
+          try {
+            pending = JSON.parse(pendingRaw) as { version?: string; notes?: string };
+          } catch {
+            /* stale/invalid data is cleared below */
+          }
+        }
+
+        const updatedFromKnownVersion = !!lastSeen && lastSeen !== info.version;
+        const updatedByInAppUpdater = pending?.version === info.version;
+        // v0.1.1 predates LAST_SEEN_VERSION_KEY, but already persisted gs-theme.
+        const upgradedFromPreMarkerVersion = !lastSeen && hadExistingInstallState;
+        if (updatedFromKnownVersion || updatedByInAppUpdater || upgradedFromPreMarkerVersion) {
+          const dateLabel = formatReleaseDate(info.releaseDate);
+          const base = dateLabel
+            ? `Updated to v${info.version} · ${dateLabel}`
+            : `Updated to v${info.version}`;
+          const notes = updatedByInAppUpdater ? summarizeUpdateNotes(pending?.notes) : null;
+          setInfo(notes ? `${base} — ${notes}` : base);
+        }
+        localStorage.setItem(LAST_SEEN_VERSION_KEY, info.version);
+        if (pendingRaw) localStorage.removeItem(PENDING_UPDATE_NOTES_KEY);
+      } catch {
+        /* non-critical (e.g. browser preview without Tauri) */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
@@ -414,7 +493,16 @@ export default function App() {
     });
 
   const onRemove = (userId: string, name: string) => {
-    if (!confirm(`Remove account “${name}” from Grok Switcher?\n(Does not delete the Grok account.)`)) {
+    const isActive = accounts.some((a) => a.userId === userId && a.isActive);
+    const others = accounts.filter((a) => a.userId !== userId).length;
+    let msg = `Remove account “${name}” from Grok Switcher?\n(Does not delete the Grok cloud account.)`;
+    if (isActive) {
+      msg +=
+        others > 0
+          ? "\n\nThis is the active CLI session — Grok will switch to another saved account."
+          : "\n\nThis is the only account — the live Grok CLI session will be cleared.";
+    }
+    if (!confirm(msg)) {
       return;
     }
     void withBusy(`remove-${userId}`, async () => {
@@ -453,6 +541,7 @@ export default function App() {
 
   const activeAccounts = accounts.filter((a) => a.isActive);
   const otherAccounts = accounts.filter((a) => !a.isActive);
+  const releaseLabel = formatReleaseDate(appInfo?.releaseDate);
 
   return (
     <div className="app">
@@ -602,6 +691,15 @@ export default function App() {
       </main>
 
       <footer className="footer">
+        {appInfo && (
+          <span className="footer-version" title={appInfo.releaseDate ?? undefined}>
+            <code>
+              {releaseLabel
+                ? `v${appInfo.version} · ${releaseLabel}`
+                : `v${appInfo.version}`}
+            </code>
+          </span>
+        )}
         <span>
           Store <code>~/.grok-switcher</code>
         </span>
@@ -759,6 +857,19 @@ export default function App() {
                 }
               />
             </label>
+
+            <div className="about-block">
+              <h3 className="about-title">About</h3>
+              <div className="about-row">
+                <span className="muted">Version</span>
+                <code>{appInfo ? `v${appInfo.version}` : "—"}</code>
+              </div>
+              <div className="about-row">
+                <span className="muted">Released</span>
+                <code>{releaseLabel ?? appInfo?.releaseDate ?? "—"}</code>
+              </div>
+            </div>
+
             <div className="modal-actions">
               <button type="button" className="btn ghost" onClick={() => setShowSettings(false)}>
                 Cancel
