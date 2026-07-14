@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths-ignore:
+      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       tag:
@@ -112,6 +114,9 @@ jobs:
     if: needs.version.outputs.is_release == 'true'
     strategy:
       fail-fast: false
+      # tauri-action read/merges/replaces one shared latest.json. Serializing the
+      # matrix prevents concurrent jobs from dropping another platform's metadata.
+      max-parallel: 1
       matrix:
         include:
           # macOS Apple Silicon (arm64) — DMG for drag-to-Applications
