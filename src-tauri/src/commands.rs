@@ -136,6 +136,7 @@ pub fn remove_account(user_id: String) -> AppResult<()> {
     let live_is_this = live_user_id.as_deref() == Some(user_id.as_str());
 
     meta.accounts.remove(&user_id);
+    meta.masked_account_ids.retain(|id| id != &user_id);
 
     // Prefer most recently used remaining account when live session must switch.
     let next_user_id = if live_is_this && !meta.accounts.is_empty() {
@@ -206,6 +207,16 @@ pub fn remove_account(user_id: String) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_masked_account_ids() -> AppResult<Vec<String>> {
+    store::get_masked_account_ids()
+}
+
+#[tauri::command]
+pub fn set_masked_account_ids(ids: Vec<String>) -> AppResult<Vec<String>> {
+    store::set_masked_account_ids(ids)
 }
 
 #[tauri::command]

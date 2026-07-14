@@ -32,6 +32,8 @@ pub fn run() {
             commands::import_current_account,
             commands::switch_account,
             commands::remove_account,
+            commands::get_masked_account_ids,
+            commands::set_masked_account_ids,
             commands::set_account_label,
             commands::refresh_quota,
             commands::refresh_all_quotas,

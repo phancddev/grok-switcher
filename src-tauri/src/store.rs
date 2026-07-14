@@ -5,6 +5,7 @@ use crate::error::{AppError, AppResult};
 use crate::paths::{accounts_dir, ensure_app_dirs, meta_path};
 use crate::settings::Settings;
 use crate::types::{AccountMeta, AccountSummary, AuthFile, MetaFile, QuotaInfo};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -172,6 +173,32 @@ pub fn set_active(user_id: &str) -> AppResult<()> {
     save_meta(&meta)
 }
 
+pub fn get_masked_account_ids() -> AppResult<Vec<String>> {
+    let meta = load_meta()?;
+    Ok(sanitize_masked_account_ids(
+        meta.masked_account_ids,
+        &meta.accounts,
+    ))
+}
+
+pub fn set_masked_account_ids(ids: Vec<String>) -> AppResult<Vec<String>> {
+    let mut meta = load_meta()?;
+    let sanitized = sanitize_masked_account_ids(ids, &meta.accounts);
+    meta.masked_account_ids = sanitized.clone();
+    save_meta(&meta)?;
+    Ok(sanitized)
+}
+
+fn sanitize_masked_account_ids(
+    ids: Vec<String>,
+    accounts: &HashMap<String, AccountMeta>,
+) -> Vec<String> {
+    let mut seen = HashSet::new();
+    ids.into_iter()
+        .filter(|id| accounts.contains_key(id) && seen.insert(id.clone()))
+        .collect()
+}
+
 pub fn upsert_meta_account(user_id: &str, account: AccountMeta) -> AppResult<()> {
     let mut meta = load_meta()?;
     meta.accounts.insert(user_id.to_string(), account);
@@ -214,4 +241,28 @@ pub fn get_access_token(user_id: &str) -> AppResult<String> {
     let auth = load_account_snapshot(user_id)?;
     let (_, entry) = primary_entry(&auth)?;
     Ok(entry.key.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masked_account_ids_are_known_and_unique() {
+        let accounts = HashMap::from([
+            ("account-a".to_string(), AccountMeta::default()),
+            ("account-b".to_string(), AccountMeta::default()),
+        ]);
+        let ids = vec![
+            "account-a".to_string(),
+            "unknown".to_string(),
+            "account-a".to_string(),
+            "account-b".to_string(),
+        ];
+
+        assert_eq!(
+            sanitize_masked_account_ids(ids, &accounts),
+            vec!["account-a".to_string(), "account-b".to_string()]
+        );
+    }
 }

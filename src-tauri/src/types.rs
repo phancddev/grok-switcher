@@ -99,6 +99,9 @@ pub struct MetaFile {
     pub accounts: HashMap<String, AccountMeta>,
     #[serde(default)]
     pub active_user_id: Option<String>,
+    /// Account IDs whose name and email are visually hidden in the app.
+    #[serde(default)]
+    pub masked_account_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

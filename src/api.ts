@@ -43,6 +43,12 @@ export const switchAccount = (userId: string) =>
 export const removeAccount = (userId: string) =>
   invoke<void>("remove_account", { userId });
 
+export const getMaskedAccountIds = () =>
+  invoke<string[]>("get_masked_account_ids");
+
+export const setMaskedAccountIds = (ids: string[]) =>
+  invoke<string[]>("set_masked_account_ids", { ids });
+
 export const setAccountLabel = (userId: string, label?: string | null) =>
   invoke<AccountSummary>("set_account_label", {
     userId,

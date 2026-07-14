@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as api from "./api";
 import type { LoginStatusEvent } from "./api";
@@ -11,6 +11,44 @@ function displayName(a: AccountSummary): string {
   const parts = [a.firstName, a.lastName].filter(Boolean).join(" ").trim();
   return parts || a.email;
 }
+
+function PrivacyIcon({ masked }: { masked: boolean }) {
+  return (
+    <svg
+      className="privacy-icon"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {masked ? (
+        <>
+          <path d="M3 3l18 18" />
+          <path d="M10.6 10.7a2 2 0 002.7 2.7" />
+          <path d="M9.9 4.3A10.7 10.7 0 0112 4c5.5 0 9 4.5 9 8a8.6 8.6 0 01-2.1 4.2" />
+          <path d="M6.6 6.6C4.3 8 3 10.2 3 12c0 3.5 3.5 8 9 8 1.2 0 2.3-.2 3.3-.6" />
+        </>
+      ) : (
+        <>
+          <path d="M2.5 12S6 5 12 5s9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z" />
+          <circle cx="12" cy="12" r="3" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+type RemoveTarget = {
+  userId: string;
+  displayName: string | null;
+  isActive: boolean;
+  hasReplacement: boolean;
+};
 
 function formatWhen(iso?: string | null): string {
   if (!iso) return "—";
@@ -193,15 +231,19 @@ function QuotaProgress({ account }: { account: AccountSummary }) {
 function AccountCardView({
   account,
   busy,
+  masked,
   onSwitch,
   onRefresh,
   onRemove,
+  onToggleMask,
 }: {
   account: AccountSummary;
   busy: string | null;
+  masked: boolean;
   onSwitch: (id: string) => void;
   onRefresh: (id: string) => void;
-  onRemove: (id: string, name: string) => void;
+  onRemove: (id: string, name: string, masked: boolean) => void;
+  onToggleMask: (id: string) => void;
 }) {
   const name = displayName(account);
   const plan = account.subscriptionTier || (account.tier != null ? `Tier ${account.tier}` : "Unknown");
@@ -219,11 +261,30 @@ function AccountCardView({
                 <span className="active-dot-core" />
               </span>
             )}
-            <h3 className="account-card-name">{name}</h3>
+            <h3 className="account-card-name">
+              <span className={masked ? "account-private-text is-masked" : "account-private-text"}>
+                {name}
+              </span>
+            </h3>
           </div>
-          <p className="account-card-email">{account.email}</p>
+          <p className="account-card-email">
+            <span className={masked ? "account-private-text is-masked" : "account-private-text"}>
+              {account.email}
+            </span>
+          </p>
         </div>
         <div className="account-card-badges">
+          <button
+            type="button"
+            className="btn btn-icon account-mask-button"
+            disabled={!!busy}
+            title={masked ? "Show account name and email" : "Hide account name and email"}
+            aria-label={masked ? "Show account name and email" : "Hide account name and email"}
+            aria-pressed={masked}
+            onClick={() => onToggleMask(account.userId)}
+          >
+            <PrivacyIcon masked={masked} />
+          </button>
           <span className="plan-chip">{plan}</span>
           {account.isActive && <span className="active-chip">Active</span>}
         </div>
@@ -266,7 +327,7 @@ function AccountCardView({
           className="btn btn-icon btn-danger-soft"
           disabled={!!busy}
           title="Remove account"
-          onClick={() => onRemove(account.userId, name)}
+          onClick={() => onRemove(account.userId, name, masked)}
         >
           ✕
         </button>
@@ -296,6 +357,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState<Settings>({});
   const [grokPath, setGrokPath] = useState<string | null>(null);
+  const [maskedAccounts, setMaskedAccounts] = useState<Set<string>>(new Set());
+  const maskedAccountsRef = useRef<Set<string>>(new Set());
+  const maskSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem("gs-theme") as ThemeMode | null;
     return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
@@ -310,12 +374,22 @@ export default function App() {
   const [loginMessages, setLoginMessages] = useState<string[]>([]);
   const [copied, setCopied] = useState<"url" | "code" | null>(null);
   const [addPhase, setAddPhase] = useState<"form" | "waiting" | "done">("form");
+  const [showImport, setShowImport] = useState(false);
+  const [importLabel, setImportLabel] = useState("");
+  const [removeTarget, setRemoveTarget] = useState<RemoveTarget | null>(null);
 
   const refresh = useCallback(async () => {
     setError(null);
     try {
       const list = await api.listAccounts();
       setAccounts(list);
+      const validIds = new Set(list.map((account) => account.userId));
+      const currentMasked = maskedAccountsRef.current;
+      const filteredMasked = new Set(Array.from(currentMasked).filter((id) => validIds.has(id)));
+      if (filteredMasked.size !== currentMasked.size) {
+        maskedAccountsRef.current = filteredMasked;
+        setMaskedAccounts(filteredMasked);
+      }
       const path = await api.resolveGrokBinary();
       setGrokPath(path);
     } catch (e) {
@@ -330,6 +404,24 @@ export default function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getMaskedAccountIds()
+      .then((ids) => {
+        if (cancelled) return;
+        const next = new Set(ids);
+        maskedAccountsRef.current = next;
+        setMaskedAccounts(next);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(`Could not load account privacy settings: ${String(e)}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Load version / release date; one-shot "Updated to…" toast when version changes.
   useEffect(() => {
@@ -478,10 +570,49 @@ export default function App() {
     }
   };
 
-  const onImport = () => {
-    const label = prompt("Optional nickname for this account:") ?? undefined;
+  const persistMaskedAccounts = (next: Set<string>) => {
+    maskedAccountsRef.current = next;
+    setMaskedAccounts(next);
+    const ids = Array.from(next);
+    maskSaveQueueRef.current = maskSaveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await api.setMaskedAccountIds(ids);
+      })
+      .catch((e) => {
+        setError(`Could not save account privacy settings: ${String(e)}`);
+      });
+  };
+
+  const toggleMask = (userId: string) => {
+    const next = new Set(maskedAccountsRef.current);
+    if (next.has(userId)) next.delete(userId);
+    else next.add(userId);
+    persistMaskedAccounts(next);
+  };
+
+  const allMasked =
+    accounts.length > 0 && accounts.every((account) => maskedAccounts.has(account.userId));
+
+  const toggleMaskAll = () => {
+    const shouldMaskAll = !accounts.every((account) => maskedAccountsRef.current.has(account.userId));
+    persistMaskedAccounts(
+      shouldMaskAll ? new Set(accounts.map((account) => account.userId)) : new Set(),
+    );
+  };
+
+  const openImportModal = () => {
+    setImportLabel("");
+    setShowImport(true);
+    setError(null);
+    setInfo(null);
+  };
+
+  const onConfirmImport = () => {
+    const label = importLabel.trim() || null;
+    setShowImport(false);
     void withBusy("import", async () => {
-      const acc = await api.importCurrentAccount(label?.trim() || null);
+      const acc = await api.importCurrentAccount(label);
       setInfo(`Imported ${acc.label || acc.email}`);
     });
   };
@@ -492,22 +623,23 @@ export default function App() {
       setInfo(`Switched to ${acc.label || acc.email}`);
     });
 
-  const onRemove = (userId: string, name: string) => {
+  const onRemove = (userId: string, name: string, masked: boolean) => {
     const isActive = accounts.some((a) => a.userId === userId && a.isActive);
-    const others = accounts.filter((a) => a.userId !== userId).length;
-    let msg = `Remove account “${name}” from Grok Switcher?\n(Does not delete the Grok cloud account.)`;
-    if (isActive) {
-      msg +=
-        others > 0
-          ? "\n\nThis is the active CLI session — Grok will switch to another saved account."
-          : "\n\nThis is the only account — the live Grok CLI session will be cleared.";
-    }
-    if (!confirm(msg)) {
-      return;
-    }
-    void withBusy(`remove-${userId}`, async () => {
-      await api.removeAccount(userId);
-      setInfo(`Removed ${name}`);
+    setRemoveTarget({
+      userId,
+      displayName: masked ? null : name,
+      isActive,
+      hasReplacement: accounts.some((a) => a.userId !== userId),
+    });
+  };
+
+  const confirmRemove = () => {
+    if (!removeTarget) return;
+    const target = removeTarget;
+    setRemoveTarget(null);
+    void withBusy(`remove-${target.userId}`, async () => {
+      await api.removeAccount(target.userId);
+      setInfo(target.displayName ? `Removed ${target.displayName}` : "Removed account");
     });
   };
 
@@ -558,6 +690,17 @@ export default function App() {
           <div className="header-actions">
             <button
               type="button"
+              className="btn btn-icon"
+              onClick={toggleMaskAll}
+              disabled={!!busy || accounts.length === 0}
+              title={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+              aria-label={allMasked ? "Show all account names and emails" : "Hide all account names and emails"}
+              aria-pressed={allMasked}
+            >
+              <PrivacyIcon masked={allMasked} />
+            </button>
+            <button
+              type="button"
               className="btn theme-toggle"
               onClick={cycleTheme}
               title={`Theme: ${themeTitle} (click to cycle)`}
@@ -603,7 +746,7 @@ export default function App() {
             >
               ⚙
             </button>
-            <button type="button" className="btn secondary" onClick={() => void onImport()} disabled={!!busy}>
+            <button type="button" className="btn secondary" onClick={openImportModal} disabled={!!busy}>
               Import
             </button>
             <button type="button" className="btn primary" onClick={openAddModal} disabled={!!busy}>
@@ -661,9 +804,11 @@ export default function App() {
                       key={a.userId}
                       account={a}
                       busy={busy}
+                      masked={maskedAccounts.has(a.userId)}
                       onSwitch={(id) => void onSwitch(id)}
                       onRefresh={(id) => void onRefreshQuota(id)}
                       onRemove={onRemove}
+                      onToggleMask={toggleMask}
                     />
                   ))}
                 </div>
@@ -678,9 +823,11 @@ export default function App() {
                       key={a.userId}
                       account={a}
                       busy={busy}
+                      masked={maskedAccounts.has(a.userId)}
                       onSwitch={(id) => void onSwitch(id)}
                       onRefresh={(id) => void onRefreshQuota(id)}
                       onRemove={onRemove}
+                      onToggleMask={toggleMask}
                     />
                   ))}
                 </div>
@@ -712,6 +859,84 @@ export default function App() {
           </span>
         )}
       </footer>
+
+      {showImport && (
+        <div className="modal-backdrop" onClick={() => setShowImport(false)}>
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="import-account-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="import-account-title">Import current account</h2>
+            <label className="field">
+              <span>Nickname (optional)</span>
+              <input
+                type="text"
+                autoFocus
+                placeholder="e.g. Work, Personal, Acc 2…"
+                value={importLabel}
+                onChange={(e) => setImportLabel(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onConfirmImport();
+                }}
+              />
+            </label>
+            <p className="hint">
+              Imports the account currently signed in at <code>~/.grok/auth.json</code>.
+            </p>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setShowImport(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn primary" onClick={onConfirmImport}>
+                Import
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {removeTarget && (
+        <div className="modal-backdrop" onClick={() => setRemoveTarget(null)}>
+          <div
+            className="modal remove-modal"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="remove-account-title"
+            aria-describedby="remove-account-description"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="remove-modal-icon" aria-hidden="true">!</div>
+            <h2 id="remove-account-title">Remove account?</h2>
+            <p id="remove-account-description" className="remove-modal-copy">
+              Remove {removeTarget.displayName ? <strong>“{removeTarget.displayName}”</strong> : "this account"}{" "}
+              from Grok Switcher? This does not delete the Grok cloud account.
+            </p>
+            {removeTarget.isActive && (
+              <p className="remove-modal-note">
+                {removeTarget.hasReplacement
+                  ? "This is the active CLI session. Grok will switch to another saved account."
+                  : "This is the only account. The live Grok CLI session will be cleared."}
+              </p>
+            )}
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="btn ghost"
+                autoFocus
+                onClick={() => setRemoveTarget(null)}
+              >
+                Cancel
+              </button>
+              <button type="button" className="btn danger" onClick={confirmRemove}>
+                Remove account
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add account modal */}
       {showAdd && (

@@ -9,6 +9,8 @@ Built with **Tauri 2**, **React**, and **TypeScript**.
 - Add accounts via the official `grok login` flow
 - Switch the active account (writes `~/.grok/auth.json`)
 - Refresh quota / billing usage per account
+- Hide account names and emails individually or all at once
+- Remove saved accounts with a cross-platform confirmation dialog
 - Portable installers: macOS DMG, Windows NSIS (current user), Linux AppImage + deb
 
 ## Prerequisites
